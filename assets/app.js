@@ -8,6 +8,10 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
+  const DEFAULT_PROVIDER = "codex";
+  const AI_PROVIDERS = ["codex", "sonnet", "grok", "deepseek"];
+  const PROVIDER_ALIASES = { claude: "codex", haiku: "codex" };
+  const VISION_PROVIDERS = new Set(["codex", "sonnet", "grok"]);
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -61,14 +65,37 @@
 
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const providerCanUseVision = (provider) => VISION_PROVIDERS.has(normalizeProviderName(provider));
+  function normalizeProviderName(provider) {
+    const raw = String(provider || DEFAULT_PROVIDER).trim().toLowerCase();
+    return PROVIDER_ALIASES[raw] || raw;
+  }
+  function selectProvider(provider) {
+    const normalized = normalizeProviderName(provider);
+    const available = AI_PROVIDERS.indexOf(normalized) !== -1 ? normalized : DEFAULT_PROVIDER;
+    aiProviderSel.value = available;
+    try { localStorage.setItem("aiProvider", available); } catch (e) {}
+    return available;
+  }
+  function setAiBusy(busy) {
+    aiStreaming = !!busy;
+    askAiBtn.disabled = !!busy;
+    askAiBtn.classList.toggle("busy", !!busy);
+  }
 
   // ===================== init =====================
   async function init() {
     if (location.protocol === "file:") return showFileProtocolHelp();
     try {
-      data = await (await fetch(DATA_URL)).json();
+      const dataResp = await fetch(DATA_URL, { cache: "no-cache" });
+      if (!dataResp.ok) throw new Error("HTTP " + dataResp.status);
+      data = await dataResp.json();
     } catch (e) {
-      resultsEl.innerHTML = stateMsg("⚠️", "Could not load slide data", "Make sure the local server is running (run <code>start.bat</code>).");
+      resultsEl.innerHTML = stateMsg("!", "Could not load slide data", "Make sure the local server is running (run <code>start.bat</code>).");
+      return;
+    }
+    if (typeof SlideSearchEngine === "undefined") {
+      resultsEl.innerHTML = stateMsg("!", "Search engine failed to load", "Hard-refresh the page or restart the local server.");
       return;
     }
     pdfTotal = data.totalPages;
@@ -84,18 +111,16 @@
     renderEmptyState();
     wireEvents();
     if (typeof pdfjsLib !== "undefined") pdfjsLib.GlobalWorkerOptions.workerSrc = "assets/pdf.worker.min.js";
+    else showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
     try {
-      // default tutor model: Claude Haiku 4.5 (best at short, precise answers);
-      // one-time migration off the previous deepseek default.
-      if (localStorage.getItem("aiProviderMigrated") !== "1") { localStorage.setItem("aiProvider", "claude"); localStorage.setItem("aiProviderMigrated", "1"); }
-      aiProviderSel.value = localStorage.getItem("aiProvider") || "claude";
-    } catch (e) { aiProviderSel.value = "claude"; }
+      selectProvider(localStorage.getItem("aiProvider") || DEFAULT_PROVIDER);
+    } catch (e) { selectProvider(DEFAULT_PROVIDER); }
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
 
-    document.body.classList.add("stealth"); // hide the brand header; sidebar is the page-thumbnail panel
+    document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
 
     const q0 = new URLSearchParams(location.search).get("q");
-    if (q0) { qInput.value = q0; clearBtn.hidden = false; runSearch(); }
+    if (q0) { revealSearch(false); qInput.value = q0; clearBtn.hidden = false; runSearch(); }
 
     goToPage(1);
   }
@@ -125,7 +150,7 @@
   function getLectureBytes(L) {
     if (!bytesCache.has(L.num)) {
       bytesCache.set(L.num, (async () => {
-        const resp = await fetch("lec/" + L.num, { cache: "no-store" });
+        const resp = await fetch("/lec/" + L.num, { cache: "no-store" });
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         const buf = new Uint8Array(await resp.arrayBuffer());
         if (!buf.byteLength) throw new Error("empty response (0 bytes)");
@@ -142,6 +167,15 @@
         pdfjsLib.getDocument({ data: buf.slice(), disableWorker: true }).promise));
     }
     return docCache.get(L.num);
+  }
+
+  async function cancelMainRender() {
+    const task = mainRenderTask;
+    if (!task) return;
+    mainRenderTask = null;
+    try { task.cancel(); } catch (e) {}
+    try { await task.promise; }
+    catch (e) { if (!e || e.name !== "RenderingCancelledException") throw e; }
   }
 
   const THUMB_W = 700; // render width (px) — displayed scaled, stays crisp
@@ -199,7 +233,11 @@
 
   async function renderMain(num) {
     const L = pageToLecture[num];
-    if (!L || typeof pdfjsLib === "undefined") return;
+    if (!L) return;
+    if (typeof pdfjsLib === "undefined") {
+      showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
+      return;
+    }
     const token = ++viewToken;
     if (frameLecture !== L.num) { loadingEl.hidden = false; viewerError.hidden = true; pageWrap.hidden = true; }
     let doc;
@@ -213,7 +251,15 @@
     if (token !== viewToken) return;
     frameLecture = L.num;
     let page;
-    try { page = await doc.getPage(num - L.startPage + 1); } catch (e) { return; }
+    try { page = await doc.getPage(num - L.startPage + 1); }
+    catch (e) {
+      return showViewerError("Could not open Folie " + num, esc((e && e.message) || e || "unknown error"));
+    }
+    if (token !== viewToken) return;
+    try { await cancelMainRender(); }
+    catch (e) {
+      return showViewerError("Could not reset renderer", esc((e && e.message) || e || "unknown error"));
+    }
     if (token !== viewToken) return;
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -228,15 +274,19 @@
     canvas.style.width = cw + "px"; canvas.style.height = ch + "px";
     pageWrap.style.width = cw + "px"; pageWrap.style.height = ch + "px";
 
-    if (mainRenderTask) { try { mainRenderTask.cancel(); } catch (e) {} }
     mainRenderTask = page.render({
       canvasContext: canvas.getContext("2d"),
       viewport: vp,
       transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
     });
     try { await mainRenderTask.promise; }
-    catch (e) { if (e && e.name === "RenderingCancelledException") return; }
+    catch (e) {
+      if (e && e.name === "RenderingCancelledException") return;
+      mainRenderTask = null;
+      return showViewerError("Could not render Folie " + num, esc((e && e.message) || e || "unknown error"));
+    }
     if (token !== viewToken) return;
+    mainRenderTask = null;
     loadingEl.hidden = true; pageWrap.hidden = false;
     zoomLevel.textContent = Math.round(scale * 100) + "%";
     curMainPage = num; curMainCW = cw; curMainCH = ch;
@@ -281,6 +331,7 @@
     searchTimer = setTimeout(runSearch, 90); // real-time, no Enter needed
   }
   function runSearch() {
+    if (!engine) return;
     const query = qInput.value.trim();
     syncUrl(query);
     if (!query) { compiled = null; renderPageList(allPages, null); redrawMainHighlights(); return; }
@@ -361,7 +412,17 @@
   const VISION_SLIDES = 2;  // also send the top-N ranked slides as images (so the model sees diagrams)
   const visionCache = new Map(); // globalPage:width -> Promise<base64 png>
 
-  function openChat() { examplesEl.hidden = true; resultsEl.hidden = true; aiPanel.hidden = false; }
+  function revealSearch(shouldFocus) {
+    document.body.classList.remove("viewer-only");
+    if (shouldFocus !== false) qInput.focus();
+  }
+  function hideSearch() {
+    if (!aiPanel.hidden) closeChat();
+    document.body.classList.add("viewer-only");
+    qInput.blur();
+  }
+
+  function openChat() { revealSearch(false); examplesEl.hidden = true; resultsEl.hidden = true; aiPanel.hidden = false; }
   function closeChat() {
     aiPanel.hidden = true;
     resultsEl.hidden = false;
@@ -425,68 +486,68 @@
     const q = qInput.value.trim();
     const imgs = pendingImages.slice();              // screenshots the user pasted
     if ((!q && !imgs.length) || aiStreaming || !engine) return;
+    setAiBusy(true);
     const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
+    let assistantTurn = null;
 
-    // Slide context (BM25 text + rendered slide images) is for TEXT questions only.
-    // A pasted screenshot is self-contained, so we send just the image — no slides.
-    let slidesText = "", topPages = [];
-    if (q && !isImageAsk) {
-      const res = engine.search(q, { limit: 12 });
-      slidesText = res.results.slice(0, 12).map((r) =>
-        "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
-        (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
-      ).join("\n\n");
-      topPages = res.results.slice(0, VISION_SLIDES).map((r) => r.page);
-    }
-
-    // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
-    let textPart;
-    if (isImageAsk) {
-      textPart = (q ? q + "\n\n" : "") +
-        "Das Bild enthält den gesamten Kontext der Aufgabe/Frage. Löse bzw. beantworte sie vollständig und " +
-        "STRUKTURIERT: gliedere mit klaren Überschriften/Abschnitten, gib je Schritt eine kurze Begründung, " +
-        "und schließe mit einem knappen Ergebnis. Nutze Listen, nummerierte Schritte oder eine Tabelle, wo es passt.";
-    } else {
-      textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "");
-    }
-
-    // neutral content blocks: text, then pasted images, then (text-ask only) slide images
-    const blocks = [{ type: "text", text: textPart }];
-    for (const im of imgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-    const slideImgs = await Promise.all(topPages.map((p) =>
-      getSlideImageForVision(p, 1200).then((d) => ({ type: "image", media_type: "image/png", data: d })).catch(() => null)
-    ));
-    for (const b of slideImgs) if (b) blocks.push(b);
-
-    // image questions → Claude Haiku 4.5 (cheaper; handles the coursework diagrams fine);
-    // deepseek-chat is text-only, so route any stray images on it to Claude too.
-    let provider = aiProviderSel.value;
-    if (isImageAsk) provider = "claude";
-    else if (blocks.some((b) => b.type === "image") && provider === "deepseek") provider = "claude";
-
-    aiThread = [];            // no history — each question is standalone
-    aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
-    aiThread.push({ role: "assistant", content: "" });
-    qInput.value = ""; clearBtn.hidden = true;
-    pendingImages = []; renderPendingImages();
-    openChat();
-    renderThread();
-
-    // payload: a single fresh turn (text + any images), no prior conversation is sent
-    const messages = [{ role: "user", content: blocks }];
-
-    const assistantTurn = aiThread[aiThread.length - 1];
-    aiStreaming = true;
-    let acc = "", pending = false;
-    const flush = () => {
-      pending = false;
-      if (!streamBodyEl) return;
-      streamBodyEl.innerHTML = renderMarkdown(acc) + '<span class="nt-caret"></span>';
-      wireSlideRefs(streamBodyEl);
-      const doc = aiPanel.querySelector("#ntDoc");
-      if (doc) doc.scrollTop = doc.scrollHeight;
-    };
     try {
+      // image questions need a vision-capable provider; text-only providers still get text RAG.
+      let provider = selectProvider(aiProviderSel.value);
+      if (isImageAsk) provider = DEFAULT_PROVIDER;
+      const includeSlideImages = !isImageAsk && providerCanUseVision(provider);
+
+      // Slide context (BM25 text + rendered slide images) is for TEXT questions only.
+      // A pasted screenshot is self-contained, so we send just the image — no slides.
+      let slidesText = "", topPages = [];
+      if (q && !isImageAsk) {
+        const res = engine.search(q, { limit: 12 });
+        slidesText = res.results.slice(0, 12).map((r) =>
+          "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
+          (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
+        ).join("\n\n");
+        topPages = includeSlideImages ? res.results.slice(0, VISION_SLIDES).map((r) => r.page) : [];
+      }
+
+      // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
+      let textPart;
+      if (isImageAsk) {
+        textPart = (q ? q + "\n\n" : "") +
+          "Das Bild enthält den gesamten Kontext der Aufgabe/Frage. Löse bzw. beantworte sie vollständig und " +
+          "STRUKTURIERT: gliedere mit klaren Überschriften/Abschnitten, gib je Schritt eine kurze Begründung, " +
+          "und schließe mit einem knappen Ergebnis. Nutze Listen, nummerierte Schritte oder eine Tabelle, wo es passt.";
+      } else {
+        textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "");
+      }
+
+      // neutral content blocks: text, then pasted images, then optional slide images
+      const blocks = [{ type: "text", text: textPart }];
+      for (const im of imgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+      const slideImgs = await Promise.all(topPages.map((p) =>
+        getSlideImageForVision(p, 1200).then((d) => ({ type: "image", media_type: "image/png", data: d })).catch(() => null)
+      ));
+      for (const b of slideImgs) if (b) blocks.push(b);
+
+      aiThread = [];            // no history — each question is standalone
+      aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
+      aiThread.push({ role: "assistant", content: "" });
+      qInput.value = ""; clearBtn.hidden = true;
+      pendingImages = []; renderPendingImages();
+      openChat();
+      renderThread();
+
+      // payload: a single fresh turn (text + any images), no prior conversation is sent
+      const messages = [{ role: "user", content: blocks }];
+
+      assistantTurn = aiThread[aiThread.length - 1];
+      let acc = "", pending = false;
+      const flush = () => {
+        pending = false;
+        if (!streamBodyEl) return;
+        streamBodyEl.innerHTML = renderMarkdown(acc) + '<span class="nt-caret"></span>';
+        wireSlideRefs(streamBodyEl);
+        const doc = aiPanel.querySelector("#ntDoc");
+        if (doc) doc.scrollTop = doc.scrollHeight;
+      };
       const resp = await fetch("q", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -508,10 +569,14 @@
       assistantTurn.content = acc || "_(keine Antwort)_";
       if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); wireSlideRefs(streamBodyEl); }
     } catch (e) {
-      assistantTurn.content = "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
-      if (streamBodyEl) streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content);
+      if (assistantTurn) {
+        assistantTurn.content = "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
+        if (streamBodyEl) streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content);
+      } else {
+        showAiToast("Fehler");
+      }
     } finally {
-      aiStreaming = false;
+      setAiBusy(false);
       const doc = aiPanel.querySelector("#ntDoc");
       if (doc) doc.scrollTop = doc.scrollHeight;
     }
@@ -613,16 +678,14 @@
   }
 
   // ---- stealth: typed commands in the search box (start with ":") ----------
-  const AI_PROVIDERS = ["claude", "sonnet", "grok", "deepseek"];
   function handleSecretCommand(v) {
     const raw = v.slice(1).toLowerCase().trim();
-    const cmd = raw === "haiku" ? "claude" : raw;   // :haiku is an alias for the Haiku provider
+    const cmd = normalizeProviderName(raw);   // :haiku and :claude are aliases for Codex
     if (raw === "ai") { toggleAiBar(); }
     else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
     else if (raw === "close") { closeChat(); return; }
     else if (AI_PROVIDERS.indexOf(cmd) !== -1) {
-      aiProviderSel.value = cmd;
-      try { localStorage.setItem("aiProvider", cmd); } catch (e) {}
+      selectProvider(cmd);
       showAiToast(aiProviderSel.options[aiProviderSel.selectedIndex].text);
     } else { showAiToast(":" + raw + " ?"); }
     qInput.value = ""; onInput();
@@ -650,10 +713,10 @@
         e.preventDefault(); e.stopPropagation();
         if (!aiPanel.hidden) { closeChat(); return; }       // close notes
         if (qInput.value) { qInput.value = ""; onInput(); return; } // clear search
-        qInput.blur();
+        hideSearch();
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
-        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :claude, :grok, :deepseek
+        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :codex, :sonnet, :grok, :deepseek
         if (e.ctrlKey || e.metaKey || pendingImages.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot is attached
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }
@@ -673,7 +736,7 @@
       }
       renderPendingImages();
     });
-    aiProviderSel.addEventListener("change", () => { try { localStorage.setItem("aiProvider", aiProviderSel.value); } catch (e) {} });
+    aiProviderSel.addEventListener("change", () => { selectProvider(aiProviderSel.value); });
     examplesEl.querySelectorAll(".chip").forEach((chip) => {
       chip.addEventListener("click", () => { qInput.value = chip.textContent; clearBtn.hidden = false; runSearch(); qInput.focus(); });
     });
@@ -697,7 +760,8 @@
       if (e.key === "Escape" && !aiPanel.hidden) { closeChat(); return; }
       const t = e.target;
       const typing = t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA");
-      if (e.key === "/" && !typing) { e.preventDefault(); qInput.focus(); } // jump to search
+      if (e.key === "/" && !typing) { e.preventDefault(); revealSearch(true); } // reveal search
+      else if (e.key === "Escape" && !typing && !document.body.classList.contains("viewer-only")) { e.preventDefault(); hideSearch(); }
       else if (!typing && e.key === "ArrowLeft") { e.preventDefault(); goToPage(pageNum - 1); }
       else if (!typing && e.key === "ArrowRight") { e.preventDefault(); goToPage(pageNum + 1); }
     });

@@ -6,7 +6,10 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = path.resolve(__dirname);
+// When packaged as a single .exe (pkg), the static assets ship next to the
+// executable rather than inside the virtual snapshot, so resolve ROOT to the
+// exe's own folder. Running normally (node serve.js) keeps __dirname.
+const ROOT = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname);
 const ROOT_PREFIX = ROOT.endsWith(path.sep) ? ROOT : ROOT + path.sep;
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const MIME = {

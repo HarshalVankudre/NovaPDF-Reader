@@ -5,3 +5,6 @@ serve.config.json
 node_modules/
 package-lock.json
 _*.png
+
+# build artifacts (packaged .exe + release zips)
+dist/

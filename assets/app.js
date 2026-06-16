@@ -458,10 +458,10 @@
     ));
     for (const b of slideImgs) if (b) blocks.push(b);
 
-    // image questions → Sonnet 4.6 (strongest on visual reasoning); otherwise keep the
-    // selected model, but deepseek-chat is text-only so route stray images to Claude.
+    // image questions → Claude Haiku 4.5 (cheaper; handles the coursework diagrams fine);
+    // deepseek-chat is text-only, so route any stray images on it to Claude too.
     let provider = aiProviderSel.value;
-    if (isImageAsk) provider = "sonnet";
+    if (isImageAsk) provider = "claude";
     else if (blocks.some((b) => b.type === "image") && provider === "deepseek") provider = "claude";
 
     aiThread = [];            // no history — each question is standalone

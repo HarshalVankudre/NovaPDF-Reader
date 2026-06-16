@@ -3,11 +3,19 @@
   "version": "1.0.0",
   "description": "A fast, offline, in-browser search engine + PDF viewer over the combined lecture slides (317 slides, VL1–VL7). Paste a database question and the most relevant slides are ranked **live as you type** (no Enter, no server round-trip). Click a result to open that slide with the matching terms highlighted.",
   "main": "serve.js",
+  "bin": "serve.js",
   "directories": {
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:exe": "pkg . --output dist/NovaPDF-Reader.exe"
+  },
+  "pkg": {
+    "targets": [
+      "node22-win-x64"
+    ],
+    "outputPath": "dist"
   },
   "keywords": [],
   "author": "",
@@ -15,5 +23,8 @@
   "type": "commonjs",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.2"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.20.0"
   }
 }

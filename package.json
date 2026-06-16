@@ -1,0 +1,19 @@
+{
+  "name": "db-slide-finder",
+  "version": "1.0.0",
+  "description": "A fast, offline, in-browser search engine + PDF viewer over the combined lecture slides (317 slides, VL1–VL7). Paste a database question and the most relevant slides are ranked **live as you type** (no Enter, no server round-trip). Click a result to open that slide with the matching terms highlighted.",
+  "main": "serve.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.104.2"
+  }
+}

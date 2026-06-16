@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DB Slide Finder — DSCB140</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%232f8d46'/%3E%3Cellipse cx='12' cy='7' rx='6' ry='2.4' fill='none' stroke='white' stroke-width='1.6'/%3E%3Cpath d='M6 7v10c0 1.3 2.7 2.4 6 2.4s6-1.1 6-2.4V7' fill='none' stroke='white' stroke-width='1.6'/%3E%3C/svg%3E" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <!-- ===== Header ===== -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <ellipse cx="12" cy="5" rx="8" ry="3"></ellipse>
+          <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"></path>
+          <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"></path>
+        </svg>
+      </span>
+      <div class="brand-text">
+        <h1>DB Slide Finder</h1>
+        <span class="brand-sub">DSCB140 · Datenbanken &amp; Datenkunde</span>
+      </div>
+    </div>
+    <div class="topbar-meta" id="topMeta">
+      <span class="pill" id="statSlides">— slides</span>
+      <span class="pill" id="statLectures">— lectures</span>
+    </div>
+  </header>
+
+  <!-- ===== Main ===== -->
+  <main class="layout">
+    <!-- Sidebar : search + results -->
+    <aside class="sidebar" id="sidebar">
+      <div class="search-wrap">
+        <div class="search-box">
+          <svg class="search-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input id="q" type="search" autocomplete="off" spellcheck="false"
+                 placeholder="" aria-label="Suchen" />
+          <button id="clearBtn" class="clear-btn" title="Clear (Esc)" aria-label="Clear search" hidden>&times;</button>
+        </div>
+        <div class="att-strip" id="attStrip" hidden></div>
+        <div class="search-status" id="status">Type a question — results appear live as you type.</div>
+        <div class="ai-bar" id="aiBar" hidden>
+          <button id="askAiBtn" class="ai-btn" title="Ask an AI to answer your question from the slides">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2l1.8 5.4L19 9l-5.2 1.6L12 16l-1.8-5.4L5 9l5.2-1.6L12 2zM19 14l.9 2.6L22 17.5l-2.1.9L19 21l-.9-2.6L16 17.5l2.1-.9L19 14z"/></svg>
+            <span>Ask AI</span>
+          </button>
+          <select id="aiProvider" class="ai-provider" title="Choose the AI model" aria-label="AI model">
+            <option value="claude">Claude Haiku 4.5</option>
+            <option value="sonnet">Claude Sonnet 4.6</option>
+            <option value="grok">Grok 4.3</option>
+            <option value="deepseek">DeepSeek V4</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="examples" id="examples">
+        <span class="ex-label">Try:</span>
+        <button class="chip">Was ist die 3. Normalform?</button>
+        <button class="chip">Primärschlüssel vs Fremdschlüssel</button>
+        <button class="chip">INNER JOIN erklären</button>
+        <button class="chip">Was bedeutet ACID?</button>
+        <button class="chip">GROUP BY und HAVING</button>
+        <button class="chip">Entity-Relationship-Modell</button>
+        <button class="chip">Normalisierung</button>
+        <button class="chip">Transaktionen</button>
+      </div>
+
+      <div id="aiPanel" class="ai-panel" hidden></div>
+      <div class="results" id="results" role="list" aria-live="polite"></div>
+    </aside>
+
+    <!-- Viewer -->
+    <section class="viewer" id="viewerSection">
+      <div class="toolbar">
+        <div class="tb-group">
+          <button id="prevBtn" class="tb-btn" title="Previous page (←)" aria-label="Previous page">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+          </button>
+          <div class="page-ctl">
+            <input id="pageInput" type="text" inputmode="numeric" value="1" aria-label="Current page" />
+            <span class="page-total">/ <span id="pageTotal">—</span></span>
+          </div>
+          <button id="nextBtn" class="tb-btn" title="Next page (→)" aria-label="Next page">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </button>
+        </div>
+
+        <div class="tb-lecture" id="tbLecture">—</div>
+
+        <div class="tb-group tb-right">
+          <button id="zoomOutBtn" class="tb-btn" title="Zoom out" aria-label="Zoom out">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <span id="zoomLevel" class="zoom-level">100%</span>
+          <button id="zoomInBtn" class="tb-btn" title="Zoom in" aria-label="Zoom in">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          </button>
+          <button id="fitBtn" class="tb-btn tb-btn-text" title="Fit width">Fit</button>
+          <select id="lectureSelect" class="lecture-select" title="Jump to lecture" aria-label="Jump to lecture">
+            <option value="">Lecture ▾</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="canvas-scroll" id="canvasScroll">
+        <div class="loading" id="loading">
+          <div class="spinner"></div>
+          <p>Loading slides…</p>
+        </div>
+        <div class="page-wrap" id="pageWrap" hidden>
+          <canvas id="pdfCanvas"></canvas>
+          <div class="hl-layer" id="hlLayer"></div>
+        </div>
+        <div class="viewer-error" id="viewerError" hidden></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="assets/pdf.min.js"></script>
+  <script src="assets/search-engine.js"></script>
+  <script src="assets/app.js"></script>
+</body>
+</html>

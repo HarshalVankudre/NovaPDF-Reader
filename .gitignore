@@ -1,0 +1,7 @@
+serve.config.json
+.env
+.env.*
+*.env
+node_modules/
+package-lock.json
+_*.png

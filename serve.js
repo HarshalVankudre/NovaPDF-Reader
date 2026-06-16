@@ -6,7 +6,8 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 
-const ROOT = __dirname;
+const ROOT = path.resolve(__dirname);
+const ROOT_PREFIX = ROOT.endsWith(path.sep) ? ROOT : ROOT + path.sep;
 const PORT = parseInt(process.env.PORT || "8000", 10);
 const MIME = {
   ".html": "text/html; charset=utf-8",
@@ -20,6 +21,87 @@ const MIME = {
   ".map": "application/json",
 };
 
+function sendJson(res, code, obj) {
+  if (res.writableEnded) return;
+  res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify(obj));
+}
+
+function sendText(res, code, text, headers = {}) {
+  if (res.writableEnded) return;
+  res.writeHead(code, Object.assign({ "Content-Type": "text/plain; charset=utf-8" }, headers));
+  res.end(text);
+}
+
+function allowMethods(req, res, methods) {
+  if (methods.includes(req.method)) return true;
+  sendText(res, 405, "Method Not Allowed", { Allow: methods.join(", ") });
+  return false;
+}
+
+function readJsonBody(req, res, maxBytes, cb) {
+  const chunks = [];
+  let size = 0;
+  let done = false;
+  req.on("data", (chunk) => {
+    if (done) return;
+    size += chunk.length;
+    if (size > maxBytes) {
+      done = true;
+      chunks.length = 0;
+      sendJson(res, 413, { error: "Request body too large" });
+      return;
+    }
+    chunks.push(chunk);
+  });
+  req.on("error", () => {
+    done = true;
+    try { res.destroy(); } catch {}
+  });
+  req.on("end", () => {
+    if (done) return;
+    let payload;
+    try { payload = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); }
+    catch (e) { return sendJson(res, 400, { error: "Invalid JSON body" }); }
+    cb(payload);
+  });
+}
+
+function insideRoot(filePath) {
+  const resolved = path.resolve(filePath);
+  return resolved === ROOT || resolved.startsWith(ROOT_PREFIX);
+}
+
+function staticBlock(filePath) {
+  const rel = path.relative(ROOT, filePath);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return { code: 403, text: "Forbidden" };
+  const parts = rel.split(path.sep);
+  if (parts.some((part) => part.startsWith("."))) return { code: 403, text: "Forbidden" };
+  const base = parts[parts.length - 1].toLowerCase();
+  if (base === "serve.config.json" || base.startsWith("serve.config.local")) return { code: 403, text: "Forbidden" };
+  if (/^assets[\\/]lectures[\\/]vl\d+\.pdf$/i.test(rel)) return { code: 404, text: "Not found" };
+  return null;
+}
+
+function parseByteRange(header, size) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(header || "");
+  if (!m || (!m[1] && !m[2])) return null;
+  let start, end;
+  if (!m[1]) {
+    const suffix = parseInt(m[2], 10);
+    if (!Number.isFinite(suffix) || suffix <= 0) return null;
+    start = Math.max(size - suffix, 0);
+    end = size - 1;
+  } else {
+    start = parseInt(m[1], 10);
+    end = m[2] ? parseInt(m[2], 10) : size - 1;
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+    if (end >= size) end = size - 1;
+  }
+  if (start < 0 || start >= size || start > end) return null;
+  return { start, end };
+}
+
 // ===================== LLM proxy (keys stay server-side) =====================
 // API keys come from environment variables, or a gitignored serve.config.json.
 // The browser never sees a key — it POSTs to /llm and this server calls the LLM.
@@ -32,18 +114,23 @@ function loadConfig() {
 }
 const CONFIG = loadConfig();
 const KEYS = {
-  claude: process.env.ANTHROPIC_API_KEY || CONFIG.anthropicApiKey || "",
+  codex: process.env.ANTHROPIC_API_KEY || CONFIG.anthropicApiKey || "",
   sonnet: process.env.ANTHROPIC_API_KEY || CONFIG.anthropicApiKey || "",
   grok: process.env.XAI_API_KEY || CONFIG.xaiApiKey || "",
   deepseek: process.env.DEEPSEEK_API_KEY || CONFIG.deepseekApiKey || "",
 };
 const M = CONFIG.models || {};
 const PROVIDERS = {
-  claude:   { label: "Claude Haiku 4.5", model: M.claude   || "claude-haiku-4-5", envHint: "ANTHROPIC_API_KEY" },
-  sonnet:   { label: "Claude Sonnet 4.6", model: M.sonnet  || "claude-sonnet-4-6", envHint: "ANTHROPIC_API_KEY" },
-  grok:     { label: "Grok 4.3",    model: M.grok     || "grok-4.3",      url: "https://api.x.ai/v1/chat/completions",         envHint: "XAI_API_KEY" },
-  deepseek: { label: "DeepSeek V4", model: M.deepseek || "deepseek-chat", url: "https://api.deepseek.com/v1/chat/completions", envHint: "DEEPSEEK_API_KEY" },
+  codex:    { label: "Codex (Haiku 4.5)", model: M.codex || M.claude || "claude-haiku-4-5", kind: "anthropic", envHint: "ANTHROPIC_API_KEY" },
+  sonnet:   { label: "Sonnet 4.6", model: M.sonnet || "claude-sonnet-4-6", kind: "anthropic", envHint: "ANTHROPIC_API_KEY" },
+  grok:     { label: "Grok 4.3", model: M.grok || "grok-4.3", kind: "openai", url: "https://api.x.ai/v1/chat/completions", envHint: "XAI_API_KEY" },
+  deepseek: { label: "DeepSeek V4", model: M.deepseek || "deepseek-chat", kind: "openai", url: "https://api.deepseek.com/v1/chat/completions", envHint: "DEEPSEEK_API_KEY" },
 };
+const PROVIDER_ALIASES = { claude: "codex", haiku: "codex" };
+function normalizeProvider(provider) {
+  const raw = String(provider || "codex").trim().toLowerCase();
+  return PROVIDER_ALIASES[raw] || raw;
+}
 
 const SYSTEM_PROMPT =
   'You are a precise study assistant for the German university database course ' +
@@ -76,11 +163,11 @@ function parseAnswer(raw) {
   return { answer: String(obj.answer == null ? "" : obj.answer).trim(), slides };
 }
 
-async function askClaude(p, system, user) {
+async function askAnthropic(p, key, system, user) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { const err = new Error("Anthropic SDK missing - run: npm install @anthropic-ai/sdk"); err.status = 500; throw err; }
-  const client = new Anthropic({ apiKey: KEYS.claude });
+  const client = new Anthropic({ apiKey: key });
   const msg = await client.messages.create({
     model: p.model,
     max_tokens: 1024,
@@ -115,6 +202,7 @@ async function askOpenAICompatible(p, key, system, user) {
 }
 
 async function askLLM(provider, question, candidates) {
+  provider = normalizeProvider(provider);
   const p = PROVIDERS[provider];
   if (!p) { const e = new Error("Unknown provider: " + provider); e.status = 400; throw e; }
   const key = KEYS[provider];
@@ -124,7 +212,7 @@ async function askLLM(provider, question, candidates) {
   }
   const user = buildUserPrompt(question, candidates);
   const t0 = Date.now();
-  const out = (provider === "claude" || provider === "sonnet") ? await askClaude(p, SYSTEM_PROMPT, user) : await askOpenAICompatible(p, key, SYSTEM_PROMPT, user);
+  const out = p.kind === "anthropic" ? await askAnthropic(p, key, SYSTEM_PROMPT, user) : await askOpenAICompatible(p, key, SYSTEM_PROMPT, user);
   const parsed = parseAnswer(out.raw);
   return { answer: parsed.answer, slides: parsed.slides, model: out.model, label: p.label, ms: Date.now() - t0 };
 }
@@ -169,11 +257,11 @@ function toOpenAIMessages(messages) {
   });
 }
 
-async function streamClaude(p, messages, res) {
+async function streamAnthropic(p, key, messages, res) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
-  const client = new Anthropic({ apiKey: KEYS.claude });
+  const client = new Anthropic({ apiKey: key });
   const stream = client.messages.stream({ model: p.model, max_tokens: 2048, system: CHAT_SYSTEM, messages: toClaudeMessages(messages) });
   stream.on("text", (t) => { try { res.write(t); } catch (e) {} });
   const fm = await stream.finalMessage();
@@ -218,11 +306,12 @@ async function streamOpenAICompatible(p, key, messages, res) {
 }
 
 async function streamChat(provider, messages, res) {
+  provider = normalizeProvider(provider);
   const p = PROVIDERS[provider];
   if (!p) throw Object.assign(new Error("Unknown provider"), { status: 400 });
   const key = KEYS[provider];
   if (!key) throw Object.assign(new Error("No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart."), { status: 400 });
-  if (provider === "claude" || provider === "sonnet") return streamClaude(p, messages, res);
+  if (p.kind === "anthropic") return streamAnthropic(p, key, messages, res);
   return streamOpenAICompatible(p, key, messages, res);
 }
 
@@ -237,6 +326,7 @@ const server = http.createServer((req, res) => {
   // fetches these bytes and renders them from an in-memory blob.
   const lec = /^\/lec\/(\d+)$/.exec(urlPath);
   if (lec) {
+    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
     const fp = path.join(ROOT, "assets", "lectures", "vl" + lec[1] + ".pdf");
     return fs.stat(fp, (err, st) => {
       if (err || !st.isFile()) { res.writeHead(404); console.log("404 lec", lec[1]); return res.end("no lecture"); }
@@ -252,46 +342,33 @@ const server = http.createServer((req, res) => {
   }
 
   // LLM proxy: browser POSTs {question, provider, candidates}; we call the model.
-  if (urlPath === "/llm" && req.method === "POST") {
-    let body = "";
-    req.on("data", (c) => { body += c; if (body.length > 4e6) req.destroy(); });
-    req.on("error", () => { try { res.destroy(); } catch {} });
-    req.on("end", async () => {
-      const sendJson = (code, obj) => {
-        res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" });
-        res.end(JSON.stringify(obj));
-      };
-      let payload;
-      try { payload = JSON.parse(body); } catch (e) { return sendJson(400, { error: "Invalid JSON body" }); }
+  if (urlPath === "/llm") {
+    if (!allowMethods(req, res, ["POST"])) return;
+    readJsonBody(req, res, 4e6, async (payload) => {
       const { question, provider, candidates } = payload || {};
-      if (!question || !Array.isArray(candidates)) return sendJson(400, { error: "Missing question or candidates" });
+      if (!question || !Array.isArray(candidates)) return sendJson(res, 400, { error: "Missing question or candidates" });
       console.log("POST /llm  provider=" + provider + "  candidates=" + candidates.length);
       try {
-        const result = await askLLM(provider || "claude", String(question), candidates);
-        sendJson(200, result);
+        const result = await askLLM(provider || "codex", String(question), candidates);
+        sendJson(res, 200, result);
       } catch (e) {
         console.log("LLM error:", e && e.message);
-        sendJson(e && e.status ? e.status : 500, { error: (e && e.message) || "LLM request failed" });
+        sendJson(res, e && e.status ? e.status : 500, { error: (e && e.message) || "LLM request failed" });
       }
     });
     return;
   }
 
   // streaming tutor chat: browser POSTs {provider, messages}; we stream tokens back
-  if (urlPath === "/q" && req.method === "POST") {
-    let body = "";
-    req.on("data", (c) => { body += c; if (body.length > 30e6) req.destroy(); });
-    req.on("error", () => { try { res.destroy(); } catch {} });
-    req.on("end", async () => {
-      const jsonErr = (code, msg) => { res.writeHead(code, { "Content-Type": "application/json; charset=utf-8" }); res.end(JSON.stringify({ error: msg })); };
-      let payload;
-      try { payload = JSON.parse(body); } catch (e) { return jsonErr(400, "Invalid JSON"); }
-      const provider = (payload && payload.provider) || "claude";
+  if (urlPath === "/q") {
+    if (!allowMethods(req, res, ["POST"])) return;
+    readJsonBody(req, res, 30e6, async (payload) => {
+      const provider = normalizeProvider((payload && payload.provider) || "codex");
       const messages = payload && payload.messages;
-      if (!Array.isArray(messages) || !messages.length) return jsonErr(400, "Missing messages");
+      if (!Array.isArray(messages) || !messages.length) return sendJson(res, 400, { error: "Missing messages" });
       const p = PROVIDERS[provider];
-      if (!p) return jsonErr(400, "Unknown provider: " + provider);
-      if (!KEYS[provider]) return jsonErr(400, "No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart the server.");
+      if (!p) return sendJson(res, 400, { error: "Unknown provider: " + provider });
+      if (!KEYS[provider]) return sendJson(res, 400, { error: "No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart the server." });
       console.log("POST /q  provider=" + provider + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       try {
@@ -305,9 +382,12 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (!allowMethods(req, res, ["GET", "HEAD"])) return;
   const safe = path.normalize(urlPath).replace(/^([/\\])+/, "");
-  const filePath = path.join(ROOT, safe);
-  if (!filePath.startsWith(ROOT)) { res.writeHead(403); return res.end("Forbidden"); }
+  const filePath = path.resolve(ROOT, safe);
+  if (!insideRoot(filePath)) return sendText(res, 403, "Forbidden");
+  const blocked = staticBlock(filePath);
+  if (blocked) return sendText(res, blocked.code, blocked.text);
 
   fs.stat(filePath, (err, st) => {
     if (err || !st.isFile()) { res.writeHead(404); console.log("404", urlPath); return res.end("Not found: " + urlPath); }
@@ -321,12 +401,9 @@ const server = http.createServer((req, res) => {
     const count = (s) => s.on("data", (c) => (sent += c.length));
 
     if (range) {
-      const m = /bytes=(\d*)-(\d*)/.exec(range) || [];
-      let start = m[1] ? parseInt(m[1], 10) : 0;
-      let end = m[2] ? parseInt(m[2], 10) : st.size - 1;
-      if (isNaN(start)) start = 0;
-      if (isNaN(end) || end >= st.size) end = st.size - 1;
-      if (start > end) { res.writeHead(416, { "Content-Range": `bytes */${st.size}` }); return res.end(); }
+      const parsed = parseByteRange(range, st.size);
+      if (!parsed) { res.writeHead(416, { "Content-Range": `bytes */${st.size}` }); return res.end(); }
+      const { start, end } = parsed;
       res.writeHead(206, {
         "Content-Type": type,
         "Content-Range": `bytes ${start}-${end}/${st.size}`,
@@ -353,6 +430,6 @@ server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} }
 server.listen(PORT, () => {
   console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
   console.log(`serving ${ROOT}`);
-  console.log("LLM keys present: claude=" + !!KEYS.claude + " grok=" + !!KEYS.grok + " deepseek=" + !!KEYS.deepseek);
+  console.log("LLM keys present: codex=" + !!KEYS.codex + " sonnet=" + !!KEYS.sonnet + " grok=" + !!KEYS.grok + " deepseek=" + !!KEYS.deepseek);
   console.log("(Ctrl+C to stop)");
 });

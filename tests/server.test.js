@@ -35,7 +35,14 @@ async function request(pathname, init) {
 (async () => {
   const child = spawn(process.execPath, ["serve.js"], {
     cwd: ROOT,
-    env: Object.assign({}, process.env, { PORT: String(PORT) }),
+    env: Object.assign({}, process.env, {
+      PORT: String(PORT),
+      OPENROUTER_API_KEY: "",
+      OPEN_ROUTER_API_KEY: "",
+      ANTHROPIC_API_KEY: "",
+      XAI_API_KEY: "",
+      DEEPSEEK_API_KEY: "",
+    }),
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -77,6 +84,17 @@ async function request(pathname, init) {
 
     const getQ = await request("/q");
     assert.strictEqual(getQ.status, 405, "/q only accepts POST");
+
+    const textRoute = await request("/q", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: "glm",
+        messages: [{ role: "user", content: [{ type: "text", text: "ACID?" }] }],
+      }),
+    });
+    assert.strictEqual(textRoute.status, 400, "text requests should validate the GLM key before streaming");
+    assert.match((await textRoute.json()).error || "", /GLM 5\.2.*OPENROUTER_API_KEY/i);
 
     console.log("server regression checks passed");
   } finally {

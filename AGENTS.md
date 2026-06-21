@@ -22,7 +22,7 @@ npm install                # installs the sole dependency, @anthropic-ai/sdk
 
 ## API keys
 
-The LLM key lives only in the Node server, never in the browser. Set whichever provider you use via env var (`ANTHROPIC_API_KEY`, `XAI_API_KEY`, `DEEPSEEK_API_KEY`) or in `serve.config.json` (gitignored; copy from `serve.config.example.json`). **Restart the server after changing keys** — config is read once at startup.
+LLM keys live only in the Node server, never in the browser. Text questions use `OPENROUTER_API_KEY` (with `OPEN_ROUTER_API_KEY` accepted for compatibility); pasted-image questions use `ANTHROPIC_API_KEY`. The server loads process environment variables first, then `.env` / `.env.txt`, then `serve.config.json` (gitignored; copy from `serve.config.example.json`). **Restart the server after changing keys** — config is read once at startup.
 
 ## Architecture
 
@@ -37,14 +37,14 @@ Three independent layers, tied together by one invariant: the **global page numb
 
 **2. Search engine — `assets/search-engine.js`** — dependency-free Okapi BM25 over an inverted index, plus a German-DB intelligence layer (diacritic folding, prefix expansion for the as-you-type feel, light stemming, bounded-edit fuzzy fallback, a bilingual synonym map, and title/coverage/proximity boosts). UMD module: the same file runs in the browser (`window.SlideSearchEngine`) and under Node (for the test). A full ranked query over 317 slides is sub-millisecond. Tune relevance via `SYN_GROUPS` (synonym/concept bridges) and the BM25 constructor options (`k1`, `b`, `titleBoost`, `coverageWeight`, `proximityWeight`) near the top of the file.
 
-**3. UI controller — `assets/app.js`** — wires everything: debounced live search, the pdf.js canvas viewer (rendered from the in-memory `/lec` bytes, cached per lecture), the lazy thumbnail result panel (IntersectionObserver), and the hidden tutor chat. The chat does RAG by sending the top BM25 slides as text **and** rendering the top slides to PNG for vision; a pasted screenshot is treated as a self-contained question (no slide context attached).
+**3. UI controller — `assets/app.js`** — wires everything: debounced live search, the pdf.js canvas viewer (rendered from the in-memory `/lec` bytes, cached per lecture), the lazy thumbnail result panel (IntersectionObserver), and the hidden tutor chat. Text questions send the top BM25 slides as text to GLM 5.2. A pasted screenshot is treated as a self-contained question and routed to Haiku 4.5 with no slide context attached.
 
 **Data pipeline — `build_index.py`** (offline, run by hand). Reads the 7 source `DSCB140 - VL*.pdf` files **from the parent directory** (`..\`, i.e. `...\Vorlesung`) — those source PDFs are **not in this repo**; only the split `assets/lectures/vl*.pdf` and the merged `assets/slides.pdf` are. It extracts per-page text plus a guessed title into `data/slides.json`, tagging each global page with its lecture.
 
 ## Providers — keep three places in sync
 
-Four AI providers: `Codex` (Haiku 4.5) and `sonnet` (Sonnet 4.6) go through the Anthropic SDK and share `ANTHROPIC_API_KEY`; `grok` and `deepseek` use an OpenAI-compatible `fetch`. Adding, removing, or renaming a provider means editing **all three**:
-- `PROVIDERS` (and `KEYS`) in `serve.js`
+Two internal routes: `glm` uses OpenRouter model `z-ai/glm-5.2` with `provider.sort: "throughput"` for all text-only requests; `haiku` uses Anthropic model `claude-haiku-4-5` only when message content contains an image. Server-side modality enforcement prevents stale clients from overriding this split. Adding, removing, or renaming a provider means editing **all three**:
+- providers and keys in `llm-config.js`
 - the `<select id="aiProvider">` options in `index.html`
 - `AI_PROVIDERS` in `assets/app.js` (drives the `:provider` typed commands)
 
@@ -55,7 +55,7 @@ Model IDs are overridable at runtime under `models` in `serve.config.json`.
 The app intentionally masquerades as a plain PDF viewer; this is a product requirement, not incidental styling — preserve it when changing the UI:
 - The brand header and the entire search sidebar are hidden by default (`document.body.classList.add("stealth")`). `/` reveals search; `Esc` steps back toward the bare viewer.
 - The chat panel is titled **"Notizen"** and carries no AI branding; the system prompts in `serve.js` explicitly forbid the model from mentioning that it's an AI or that the text is generated.
-- It is driven from the keyboard: **Ctrl+Enter** asks the tutor; typed `:`-commands in the search box switch state (`:ai` toggles the visible controls, `:new` resets the thread, `:Codex` / `:sonnet` / `:grok` / `:deepseek`, with `:haiku` as an alias for `Codex`).
+- It is driven from the keyboard: **Ctrl+Enter** asks the tutor; typed `:`-commands in the search box switch state (`:ai` toggles the visible controls, `:new` resets the thread, and `:glm` selects the text route; old provider names remain aliases for GLM).
 - Endpoint names (`/q`, `/llm`, `/lec`) are deliberately neutral.
 
 ## Gotchas

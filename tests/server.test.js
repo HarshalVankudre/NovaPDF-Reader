@@ -56,6 +56,12 @@ async function request(pathname, init) {
     const config = await request("/serve.config.json");
     assert.strictEqual(config.status, 403, "serve.config.json must not be exposed");
 
+    const envFile = await request("/.env");
+    assert.strictEqual(envFile.status, 403, ".env must not be exposed");
+
+    const envTextFile = await request("/.env.txt");
+    assert.strictEqual(envTextFile.status, 403, ".env.txt must not be exposed");
+
     const dotfile = await request("/.git/config");
     assert.strictEqual(dotfile.status, 403, ".git files must not be exposed");
 

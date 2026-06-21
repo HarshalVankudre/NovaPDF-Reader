@@ -44,26 +44,29 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | **Esc** | Step back: close notes → clear query → hide search → plain viewer |
 | **← / →** | Previous / next page (works in plain-viewer mode too) |
 | type `:new` ↵ | Start a fresh conversation (clears the thread) |
-| type `:claude` / `:grok` / `:deepseek` ↵ | Switch model (tiny toast confirms) |
+| type `:glm` ↵ | Select the text model (`:haiku`, `:claude`, `:codex`, `:sonnet`, `:grok`, and `:deepseek` remain compatibility aliases) |
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
-Set the matching key (e.g. `DEEPSEEK_API_KEY`) per the section above. The proxy
+Text questions use OpenRouter `z-ai/glm-5.2` with throughput-first provider
+routing. Pasted screenshots automatically use Anthropic Haiku 4.5. The proxy
 endpoints are `/q` (streaming chat) and `/llm` (single-shot, legacy) — neutral
 names, keys server-side only.
 
-The API key lives **only in the Node server** (never in the browser). Set whichever
-you have, then restart the server:
+API keys live **only in the Node server** (never in the browser). Set the
+OpenRouter key for text questions and, if screenshot questions are needed, the
+Anthropic key. Restart the server after changing either:
 
 ```powershell
 # Recommended — environment variable (never written to disk):
-setx ANTHROPIC_API_KEY "sk-ant-..."      # Claude Haiku 4.5  (also: XAI_API_KEY, DEEPSEEK_API_KEY)
+setx OPENROUTER_API_KEY "sk-or-..."
+setx ANTHROPIC_API_KEY "sk-ant-..."      # optional: pasted screenshots
 # reopen the terminal so the variable takes effect, then: node serve.js
 ```
 
-Or copy `serve.config.example.json` → `serve.config.json` (gitignored) and paste
-your key(s) there. Per query this sends ~2.5K tokens and costs a fraction of a
-cent; the slides are public coursework, nothing sensitive. Model IDs are
-configurable under `models` in the config if a provider renames them.
+The server also loads `.env` and `.env.txt` from the project directory. The
+canonical key name is `OPENROUTER_API_KEY`; `OPEN_ROUTER_API_KEY` remains
+accepted for compatibility. Alternatively, copy `serve.config.example.json` to
+`serve.config.json` (gitignored). Model IDs are configurable under `models`.
 
 ## How it works
 

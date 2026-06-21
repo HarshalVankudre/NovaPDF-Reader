@@ -5,6 +5,11 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const {
+  createLLMConfig,
+  selectProviderForMessages,
+  buildOpenAIRequestBody,
+} = require("./llm-config");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -116,24 +121,9 @@ function loadConfig() {
   return {};
 }
 const CONFIG = loadConfig();
-const KEYS = {
-  codex: process.env.ANTHROPIC_API_KEY || CONFIG.anthropicApiKey || "",
-  sonnet: process.env.ANTHROPIC_API_KEY || CONFIG.anthropicApiKey || "",
-  grok: process.env.XAI_API_KEY || CONFIG.xaiApiKey || "",
-  deepseek: process.env.DEEPSEEK_API_KEY || CONFIG.deepseekApiKey || "",
-};
-const M = CONFIG.models || {};
-const PROVIDERS = {
-  codex:    { label: "Codex (Haiku 4.5)", model: M.codex || M.claude || "claude-haiku-4-5", kind: "anthropic", envHint: "ANTHROPIC_API_KEY" },
-  sonnet:   { label: "Sonnet 4.6", model: M.sonnet || "claude-sonnet-4-6", kind: "anthropic", envHint: "ANTHROPIC_API_KEY" },
-  grok:     { label: "Grok 4.3", model: M.grok || "grok-4.3", kind: "openai", url: "https://api.x.ai/v1/chat/completions", envHint: "XAI_API_KEY" },
-  deepseek: { label: "DeepSeek V4", model: M.deepseek || "deepseek-chat", kind: "openai", url: "https://api.deepseek.com/v1/chat/completions", envHint: "DEEPSEEK_API_KEY" },
-};
-const PROVIDER_ALIASES = { claude: "codex", haiku: "codex" };
-function normalizeProvider(provider) {
-  const raw = String(provider || "codex").trim().toLowerCase();
-  return PROVIDER_ALIASES[raw] || raw;
-}
+const LLM = createLLMConfig(ROOT, CONFIG);
+const KEYS = LLM.keys;
+const PROVIDERS = LLM.providers;
 
 const SYSTEM_PROMPT =
   'You are a precise study assistant for the German university database course ' +
@@ -185,13 +175,12 @@ async function askOpenAICompatible(p, key, system, user) {
   const resp = await fetch(p.url, {
     method: "POST",
     headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: p.model,
+    body: JSON.stringify(buildOpenAIRequestBody(p, {
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       max_tokens: 1024,
       temperature: 0.2,
       response_format: { type: "json_object" },
-    }),
+    })),
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
@@ -204,11 +193,9 @@ async function askOpenAICompatible(p, key, system, user) {
   return { raw: text, model: (data && data.model) || p.model };
 }
 
-async function askLLM(provider, question, candidates) {
-  provider = normalizeProvider(provider);
-  const p = PROVIDERS[provider];
-  if (!p) { const e = new Error("Unknown provider: " + provider); e.status = 400; throw e; }
-  const key = KEYS[provider];
+async function askLLM(question, candidates) {
+  const p = PROVIDERS.glm;
+  const key = KEYS.glm;
   if (!key) {
     const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
@@ -275,11 +262,10 @@ async function streamOpenAICompatible(p, key, messages, res) {
   const resp = await fetch(p.url, {
     method: "POST",
     headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: p.model,
+    body: JSON.stringify(buildOpenAIRequestBody(p, {
       messages: [{ role: "system", content: CHAT_SYSTEM }].concat(toOpenAIMessages(messages)),
       max_tokens: 2048, temperature: 0.3, stream: true,
-    }),
+    })),
   });
   if (!resp.ok || !resp.body) {
     const t = await resp.text().catch(() => "");
@@ -308,10 +294,9 @@ async function streamOpenAICompatible(p, key, messages, res) {
   }
 }
 
-async function streamChat(provider, messages, res) {
-  provider = normalizeProvider(provider);
+async function streamChat(messages, res) {
+  const provider = selectProviderForMessages(messages);
   const p = PROVIDERS[provider];
-  if (!p) throw Object.assign(new Error("Unknown provider"), { status: 400 });
   const key = KEYS[provider];
   if (!key) throw Object.assign(new Error("No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart."), { status: 400 });
   if (p.kind === "anthropic") return streamAnthropic(p, key, messages, res);
@@ -348,11 +333,11 @@ const server = http.createServer((req, res) => {
   if (urlPath === "/llm") {
     if (!allowMethods(req, res, ["POST"])) return;
     readJsonBody(req, res, 4e6, async (payload) => {
-      const { question, provider, candidates } = payload || {};
+      const { question, candidates } = payload || {};
       if (!question || !Array.isArray(candidates)) return sendJson(res, 400, { error: "Missing question or candidates" });
-      console.log("POST /llm  provider=" + provider + "  candidates=" + candidates.length);
+      console.log("POST /llm  provider=glm  candidates=" + candidates.length);
       try {
-        const result = await askLLM(provider || "codex", String(question), candidates);
+        const result = await askLLM(String(question), candidates);
         sendJson(res, 200, result);
       } catch (e) {
         console.log("LLM error:", e && e.message);
@@ -366,16 +351,15 @@ const server = http.createServer((req, res) => {
   if (urlPath === "/q") {
     if (!allowMethods(req, res, ["POST"])) return;
     readJsonBody(req, res, 30e6, async (payload) => {
-      const provider = normalizeProvider((payload && payload.provider) || "codex");
       const messages = payload && payload.messages;
       if (!Array.isArray(messages) || !messages.length) return sendJson(res, 400, { error: "Missing messages" });
+      const provider = selectProviderForMessages(messages);
       const p = PROVIDERS[provider];
-      if (!p) return sendJson(res, 400, { error: "Unknown provider: " + provider });
       if (!KEYS[provider]) return sendJson(res, 400, { error: "No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart the server." });
       console.log("POST /q  provider=" + provider + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       try {
-        await streamChat(provider, messages, res);
+        await streamChat(messages, res);
       } catch (e) {
         console.log("stream error:", e && e.message);
         try { res.write("\n\n_(Fehler: " + ((e && e.message) || "stream failed") + ")_"); } catch (e2) {}
@@ -433,6 +417,6 @@ server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} }
 server.listen(PORT, () => {
   console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
   console.log(`serving ${ROOT}`);
-  console.log("LLM keys present: codex=" + !!KEYS.codex + " sonnet=" + !!KEYS.sonnet + " grok=" + !!KEYS.grok + " deepseek=" + !!KEYS.deepseek);
+  console.log("LLM keys present: glm=" + !!KEYS.glm + " haiku=" + !!KEYS.haiku);
   console.log("(Ctrl+C to stop)");
 });

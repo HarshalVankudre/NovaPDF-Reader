@@ -8,10 +8,16 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const DEFAULT_PROVIDER = "codex";
-  const AI_PROVIDERS = ["codex", "sonnet", "grok", "deepseek"];
-  const PROVIDER_ALIASES = { claude: "codex", haiku: "codex" };
-  const VISION_PROVIDERS = new Set(["codex", "sonnet", "grok"]);
+  const DEFAULT_PROVIDER = "glm";
+  const AI_PROVIDERS = ["glm"];
+  const PROVIDER_ALIASES = {
+    haiku: "glm",
+    claude: "glm",
+    codex: "glm",
+    sonnet: "glm",
+    grok: "glm",
+    deepseek: "glm",
+  };
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -65,7 +71,6 @@
 
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  const providerCanUseVision = (provider) => VISION_PROVIDERS.has(normalizeProviderName(provider));
   function normalizeProviderName(provider) {
     const raw = String(provider || DEFAULT_PROVIDER).trim().toLowerCase();
     return PROVIDER_ALIASES[raw] || raw;
@@ -409,8 +414,6 @@
   let aiStreaming = false;
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
-  const VISION_SLIDES = 2;  // also send the top-N ranked slides as images (so the model sees diagrams)
-  const visionCache = new Map(); // globalPage:width -> Promise<base64 png>
 
   function revealSearch(shouldFocus) {
     document.body.classList.remove("viewer-only");
@@ -430,7 +433,7 @@
     qInput.focus();
   }
 
-  // ---- images: pasted screenshots + rendered slide pictures (vision) --------
+  // ---- pasted screenshots ---------------------------------------------------
   // Downscale a pasted image blob → {media_type, data(base64, no prefix), dataUrl}.
   function processImageBlob(blob, maxDim) {
     return new Promise((resolve, reject) => {
@@ -449,24 +452,6 @@
       img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
       img.src = url;
     });
-  }
-  // Render a slide to a base64 PNG at ~targetW px so the model can read diagrams.
-  function getSlideImageForVision(globalPage, targetW) {
-    const key = globalPage + ":" + (targetW || 1200);
-    if (!visionCache.has(key)) {
-      visionCache.set(key, (async () => {
-        const L = pageToLecture[globalPage];
-        const doc = await getLectureDoc(L);
-        const page = await doc.getPage(globalPage - L.startPage + 1);
-        const base = page.getViewport({ scale: 1 });
-        const vp = page.getViewport({ scale: (targetW || 1200) / base.width });
-        const c = document.createElement("canvas");
-        c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
-        await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
-        return c.toDataURL("image/png").split(",")[1];
-      })());
-    }
-    return visionCache.get(key);
   }
   // Discreet attachment strip: small thumbnails of queued pastes, each removable.
   function renderPendingImages() {
@@ -491,21 +476,17 @@
     let assistantTurn = null;
 
     try {
-      // image questions need a vision-capable provider; text-only providers still get text RAG.
-      let provider = selectProvider(aiProviderSel.value);
-      if (isImageAsk) provider = DEFAULT_PROVIDER;
-      const includeSlideImages = !isImageAsk && providerCanUseVision(provider);
+      const provider = isImageAsk ? "haiku" : "glm";
 
-      // Slide context (BM25 text + rendered slide images) is for TEXT questions only.
+      // BM25 slide text is for TEXT questions only.
       // A pasted screenshot is self-contained, so we send just the image — no slides.
-      let slidesText = "", topPages = [];
+      let slidesText = "";
       if (q && !isImageAsk) {
         const res = engine.search(q, { limit: 12 });
         slidesText = res.results.slice(0, 12).map((r) =>
           "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
           (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
         ).join("\n\n");
-        topPages = includeSlideImages ? res.results.slice(0, VISION_SLIDES).map((r) => r.page) : [];
       }
 
       // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
@@ -519,13 +500,9 @@
         textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "");
       }
 
-      // neutral content blocks: text, then pasted images, then optional slide images
+      // neutral content blocks: text, then pasted images
       const blocks = [{ type: "text", text: textPart }];
       for (const im of imgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-      const slideImgs = await Promise.all(topPages.map((p) =>
-        getSlideImageForVision(p, 1200).then((d) => ({ type: "image", media_type: "image/png", data: d })).catch(() => null)
-      ));
-      for (const b of slideImgs) if (b) blocks.push(b);
 
       aiThread = [];            // no history — each question is standalone
       aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
@@ -680,7 +657,7 @@
   // ---- stealth: typed commands in the search box (start with ":") ----------
   function handleSecretCommand(v) {
     const raw = v.slice(1).toLowerCase().trim();
-    const cmd = normalizeProviderName(raw);   // :haiku and :claude are aliases for Codex
+    const cmd = normalizeProviderName(raw);   // legacy provider names are aliases for GLM
     if (raw === "ai") { toggleAiBar(); }
     else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
     else if (raw === "close") { closeChat(); return; }
@@ -716,7 +693,7 @@
         hideSearch();
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
-        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :codex, :sonnet, :grok, :deepseek
+        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :glm (legacy names alias to GLM)
         if (e.ctrlKey || e.metaKey || pendingImages.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot is attached
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }

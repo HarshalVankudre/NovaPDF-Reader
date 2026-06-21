@@ -1,12 +1,9 @@
 {
-  "_comment": "Copy this file to serve.config.json and fill in the keys you have. serve.config.json is gitignored. Prefer environment variables (ANTHROPIC_API_KEY / XAI_API_KEY / DEEPSEEK_API_KEY) if you can — they never touch disk. Restart the server after changing keys.",
+  "_comment": "Copy this file to serve.config.json and fill in the keys you have. Prefer OPENROUTER_API_KEY and ANTHROPIC_API_KEY environment variables, or local .env/.env.txt entries. Restart after changing keys.",
+  "openrouterApiKey": "sk-or-...",
   "anthropicApiKey": "sk-ant-...",
-  "xaiApiKey": "xai-...",
-  "deepseekApiKey": "sk-...",
   "models": {
-    "codex": "claude-haiku-4-5",
-    "sonnet": "claude-sonnet-4-6",
-    "grok": "grok-4.3",
-    "deepseek": "deepseek-chat"
+    "glm": "z-ai/glm-5.2",
+    "haiku": "claude-haiku-4-5"
   }
 }

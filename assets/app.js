@@ -480,10 +480,13 @@
 
       // BM25 slide text is for TEXT questions only.
       // A pasted screenshot is self-contained, so we send just the image — no slides.
+      let citationSlides = [];
       let slidesText = "";
       if (q && !isImageAsk) {
         const res = engine.search(q, { limit: 12 });
-        slidesText = res.results.slice(0, 12).map((r) =>
+        const pickedSlides = res.results.slice(0, 12);
+        citationSlides = pickedSlides.map((r) => data.slides[r.docId]).filter(Boolean);
+        slidesText = pickedSlides.map((r) =>
           "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
           (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
         ).join("\n\n");
@@ -544,6 +547,11 @@
         if (!pending) { pending = true; requestAnimationFrame(flush); }
       }
       assistantTurn.content = acc || "_(keine Antwort)_";
+      try {
+        if (typeof SlideSearchEngine !== "undefined" && typeof SlideSearchEngine.verifyCitations === "function") {
+          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides);
+        }
+      } catch (e) {}
       if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); wireSlideRefs(streamBodyEl); }
     } catch (e) {
       if (assistantTurn) {
@@ -598,12 +606,13 @@
   // minimal, safe Markdown -> HTML (escapes everything; tolerant of partial input)
   function renderMarkdown(src) {
     if (!src) return "";
+    const SLIDE_REF_RE = /\b(Folien?|Slides?|S\.?)\s*(\d+(?:\s*(?:[,;/&]|und|and)\s*(?:(?:Folien?|Slides?|S\.?)\s*)?\d+)*)/g;
     const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
     let html = "", listType = null, inCode = false, codeBuf = [], para = [];
     function inline(t) {
       t = esc(t);
-      t = t.replace(/\b(Folien?|Slides?|S\.)\s*(\d{1,3}(?:\s*(?:[,;/&]|und|and)\s*\d{1,3})*)/g, function (m, kw, nums) {
-        return kw + " " + nums.replace(/\d{1,3}/g, function (n) { return '<a class="nt-ref" data-page="' + n + '">' + n + "</a>"; });
+      t = t.replace(SLIDE_REF_RE, function (m, kw, nums) {
+        return kw + " " + nums.replace(/\d+/g, function (n) { return '<a class="nt-ref" data-page="' + n + '">' + n + "</a>"; });
       });
       return t
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")

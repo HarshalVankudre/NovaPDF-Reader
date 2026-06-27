@@ -85,4 +85,48 @@ for (let i = 0; i < ITER; i++) sink += engine.search(bq[i % bq.length], { limit:
 let dt = performance.now() - t0;
 console.log(`${ITER} queries in ${dt.toFixed(1)}ms  ->  ${((dt / ITER) * 1000).toFixed(1)} µs/query  (sink=${sink})`);
 
-process.exit(pass === CASES.length ? 0 : 1);
+// == citation verifier ==
+console.log("");
+console.log("== citation verifier ==");
+let vpass = 0, vfail = 0;
+function vcase(name, answer, expect) {
+  const out = SlideSearchEngine.verifyCitations(answer, data.slides);
+  const ok = out === expect;
+  if (ok) vpass++; else vfail++;
+  console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
+  if (!ok) { console.log("  in : " + JSON.stringify(answer)); console.log("  out: " + JSON.stringify(out)); console.log("  exp: " + JSON.stringify(expect)); }
+}
+
+// 1. supported citation kept — pick a real slide and a term actually on it
+const sReal = data.slides[0]; // page 1, text contains "Datenbanken"
+vcase("supported citation kept", "Datenbanken sind wichtig (Folie " + sReal.page + ")", "Datenbanken sind wichtig (Folie " + sReal.page + ")");
+
+// 2. page does not exist -> stripped
+vcase("missing page stripped", "Etwas erfundenes (Folie 99999)", "Etwas erfundenes");
+
+// 3. real page but claim term not on it -> stripped
+const sOther = data.slides[0];
+vcase("unsupported claim stripped", "Quantenverschränkung von Tupeln (Folie " + sOther.page + ")", "Quantenverschränkung von Tupeln");
+
+// 4. multiple citations, mixed -> only bad one stripped
+const sReal2 = data.slides[1] || data.slides[0];
+vcase("mixed citations", "Datenbanken (Folie " + sReal.page + ", Folie 99999)", "Datenbanken (Folie " + sReal.page + ")");
+
+// 5. no citations -> unchanged
+vcase("no citations unchanged", "SELECT * FROM kunde;", "SELECT * FROM kunde;");
+
+// 6. unparseable ref -> untouched
+vcase("unparseable untouched", "Siehe Folie (unbekannt)", "Siehe Folie (unbekannt)");
+
+// 7. verifier never throws on weird input
+let threw = false;
+try { SlideSearchEngine.verifyCitations(null, data.slides); } catch (e) { threw = true; }
+if (!threw) vpass++; else vfail++;
+console.log(`${!threw ? "PASS" : "FAIL"}  null input no throw`);
+
+const vtotal = vpass + vfail;
+console.log(`\n${vpass}/${vtotal} citation checks passed\n`);
+
+const failed = (pass === CASES.length ? 0 : 1) + vfail;
+console.log(`== summary: ${pass + vpass}/${CASES.length + vtotal} passed ==`);
+process.exit(failed > 0 ? 1 : 0);

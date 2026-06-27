@@ -25,17 +25,17 @@ data/PDF.
 > Tip: hard-refresh with **Ctrl+Shift+R** after any code change to bypass the
 > browser cache.
 
-## Hidden tutor chat (stealth, streaming)
+## Hidden tutor chat (stealth, streaming, RAG over the slides)
 
 **Looks like a plain PDF viewer by default** — the page opens with just the slide
 + page/zoom toolbar; the brand header and the entire search sidebar are hidden.
 Press **`/`** to reveal the search; **Esc** collapses it back to the bare viewer.
 
-The visible search and hidden tutor are separate. BM25 ranks the 317 slides live
-in the sidebar; Ctrl+Enter sends only the typed question (plus any screenshot
-you pasted) to the tutor. It does not attach extracted slide text, rendered
-lecture slides, or automatic `(Folie N)` citations. Each question is standalone
-and streams into the "Notizen" panel with **no AI branding**.
+The search + a hidden tutor chatbot are driven entirely from the keyboard. Under
+the hood the keyword engine narrows 317 slides to the top ~12, the LLM streams a
+grounded answer formatted as **course notes in Markdown** (headings, bullets, SQL
+code blocks, tables), and cites slides inline as clickable `(Folie 299)` links.
+It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding**.
 
 | Key / command | Action |
 |---|---|
@@ -44,23 +44,29 @@ and streams into the "Notizen" panel with **no AI branding**.
 | **Esc** | Step back: close notes → clear query → hide search → plain viewer |
 | **← / →** | Previous / next page (works in plain-viewer mode too) |
 | type `:new` ↵ | Start a fresh conversation (clears the thread) |
+| type `:glm` ↵ | Select the text model (`:haiku`, `:claude`, `:codex`, `:sonnet`, `:grok`, and `:deepseek` remain compatibility aliases) |
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
-The proxy endpoints are `/q` (streaming chat) and `/llm` (single-shot, legacy) —
-neutral names, with the key kept server-side only.
+Text questions use OpenRouter `z-ai/glm-5.2` with throughput-first provider
+routing. Pasted screenshots automatically use Anthropic Haiku 4.5. The proxy
+endpoints are `/q` (streaming chat) and `/llm` (single-shot, legacy) — neutral
+names, keys server-side only.
 
-The API key lives **only in the Node server** (never in the browser). Set your
-OpenRouter key, then restart the server:
+API keys live **only in the Node server** (never in the browser). Set the
+OpenRouter key for text questions and, if screenshot questions are needed, the
+Anthropic key. Restart the server after changing either:
 
 ```powershell
 # Recommended — environment variable (never written to disk):
 setx OPENROUTER_API_KEY "sk-or-..."
+setx ANTHROPIC_API_KEY "sk-ant-..."      # optional: pasted screenshots
 # reopen the terminal so the variable takes effect, then: node serve.js
 ```
 
-Or copy `serve.config.example.json` → `serve.config.json` (gitignored) and paste
-your key there. The tutor defaults to Qwen 3.5 Flash with reasoning disabled;
-the model ID is configurable under `models.tutor`.
+The server also loads `.env` and `.env.txt` from the project directory. The
+canonical key name is `OPENROUTER_API_KEY`; `OPEN_ROUTER_API_KEY` remains
+accepted for compatibility. Alternatively, copy `serve.config.example.json` to
+`serve.config.json` (gitignored). Model IDs are configurable under `models`.
 
 ## How it works
 
@@ -68,7 +74,6 @@ the model ID is configurable under `models.tutor`.
 index.html ─┬─ assets/pdf.min.js          (PDF.js, vendored — fully offline)
             ├─ assets/pdf.worker.min.js
             ├─ assets/search-engine.js     (the search engine — no dependencies)
-            ├─ assets/tutor-message.js     (question + optional screenshot payload)
             ├─ assets/app.js               (UI: viewer + live search wiring)
             ├─ assets/style.css            (GeeksforGeeks-style UI)
             ├─ assets/slides.pdf           (the merged 317-slide PDF)

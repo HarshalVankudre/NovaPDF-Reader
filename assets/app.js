@@ -8,6 +8,16 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
+  const DEFAULT_PROVIDER = "glm";
+  const AI_PROVIDERS = ["glm"];
+  const PROVIDER_ALIASES = {
+    haiku: "glm",
+    claude: "glm",
+    codex: "glm",
+    sonnet: "glm",
+    grok: "glm",
+    deepseek: "glm",
+  };
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -18,6 +28,7 @@
   const statSlides = $("statSlides");
   const statLectures = $("statLectures");
   const askAiBtn = $("askAiBtn");
+  const aiProviderSel = $("aiProvider");
   const aiPanel = $("aiPanel");
   const aiBar = $("aiBar");
   const attStrip = $("attStrip");
@@ -57,14 +68,20 @@
   const docCache = new Map();   // lectureNum -> Promise<PDFDocumentProxy>
   const pageRenderCache = new Map(); // globalPage -> Promise<{bitmap,cssW,cssH,items}>
   let thumbObserver = null;
-  // main-view render cache: instant revisit (and zoom-back) + neighbour prefetch
-  const mainBitmapCache = new Map(); // "page@scale@dpr" -> {bitmap,cssW,cssH,devW,devH}
-  const pageBaseW = new Map();       // globalPage -> unscaled viewport width
-  const MAIN_CACHE_MAX = 10;         // keep ~10 full-res pages, LRU-evicted
-  let zoomTimer = null, targetScale = 0, prefetchTimer = null;
 
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  function normalizeProviderName(provider) {
+    const raw = String(provider || DEFAULT_PROVIDER).trim().toLowerCase();
+    return PROVIDER_ALIASES[raw] || raw;
+  }
+  function selectProvider(provider) {
+    const normalized = normalizeProviderName(provider);
+    const available = AI_PROVIDERS.indexOf(normalized) !== -1 ? normalized : DEFAULT_PROVIDER;
+    aiProviderSel.value = available;
+    try { localStorage.setItem("aiProvider", available); } catch (e) {}
+    return available;
+  }
   function setAiBusy(busy) {
     aiStreaming = !!busy;
     askAiBtn.disabled = !!busy;
@@ -100,6 +117,9 @@
     wireEvents();
     if (typeof pdfjsLib !== "undefined") pdfjsLib.GlobalWorkerOptions.workerSrc = "assets/pdf.worker.min.js";
     else showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
+    try {
+      selectProvider(localStorage.getItem("aiProvider") || DEFAULT_PROVIDER);
+    } catch (e) { selectProvider(DEFAULT_PROVIDER); }
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
 
     document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
@@ -135,7 +155,7 @@
   function getLectureBytes(L) {
     if (!bytesCache.has(L.num)) {
       bytesCache.set(L.num, (async () => {
-        const resp = await fetch("/lec/" + L.num, { cache: "default" }); // server caches it (immutable) → instant re-open
+        const resp = await fetch("/lec/" + L.num, { cache: "no-store" });
         if (!resp.ok) throw new Error("HTTP " + resp.status);
         const buf = new Uint8Array(await resp.arrayBuffer());
         if (!buf.byteLength) throw new Error("empty response (0 bytes)");
@@ -216,76 +236,6 @@
     card.classList.add("thumb-ready");
   }
 
-  // ---- fast main-view rendering: bitmap cache + prefetch + instant zoom -------
-  const computeDpr = () => Math.min(window.devicePixelRatio || 1, 2);
-  const availW = () => Math.max(canvasScroll.clientWidth - 48, 240);
-  const mainKey = (page, scale, dpr) => page + "@" + scale.toFixed(4) + "@" + dpr;
-  const toBitmap = (cv) => (typeof createImageBitmap === "function" ? createImageBitmap(cv) : Promise.resolve(cv));
-
-  function putMainBitmap(key, entry) {
-    const prev = mainBitmapCache.get(key);
-    if (prev) {
-      mainBitmapCache.delete(key); // re-insert = most-recent
-      if (prev.bitmap && prev.bitmap !== entry.bitmap && typeof prev.bitmap.close === "function") { try { prev.bitmap.close(); } catch (e) {} }
-    }
-    mainBitmapCache.set(key, entry);
-    while (mainBitmapCache.size > MAIN_CACHE_MAX) {
-      const oldestKey = mainBitmapCache.keys().next().value;
-      const old = mainBitmapCache.get(oldestKey);
-      mainBitmapCache.delete(oldestKey);
-      if (old && old.bitmap && typeof old.bitmap.close === "function") { try { old.bitmap.close(); } catch (e) {} }
-    }
-  }
-  // Paint a cached render straight to the visible canvas — no pdf.js, instant.
-  function drawMainBitmap(entry) {
-    canvas.style.transform = "";
-    canvas.width = entry.devW; canvas.height = entry.devH;
-    canvas.style.width = entry.cssW + "px"; canvas.style.height = entry.cssH + "px";
-    pageWrap.style.width = entry.cssW + "px"; pageWrap.style.height = entry.cssH + "px";
-    canvas.getContext("2d").drawImage(entry.bitmap, 0, 0);
-    loadingEl.hidden = true; viewerError.hidden = true; pageWrap.hidden = false;
-  }
-  // Render a neighbour page into the cache (off the live canvas) so the next
-  // arrow-key press is instant. Idle-scheduled, one page at a time.
-  async function prefetchMain(n, manual, manualScale, dpr, aw) {
-    if (n < 1 || n > pdfTotal || typeof pdfjsLib === "undefined") return;
-    const L = pageToLecture[n];
-    if (!L) return;
-    try {
-      const doc = await getLectureDoc(L);
-      const page = await doc.getPage(n - L.startPage + 1);
-      const base = page.getViewport({ scale: 1 });
-      pageBaseW.set(n, base.width);
-      const scale = manual && manualScale ? manualScale : aw / base.width;
-      const key = mainKey(n, scale, dpr);
-      if (mainBitmapCache.has(key)) return;
-      const vp = page.getViewport({ scale });
-      const c = document.createElement("canvas");
-      c.width = Math.floor(vp.width * dpr); c.height = Math.floor(vp.height * dpr);
-      await page.render({ canvasContext: c.getContext("2d"), viewport: vp, transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null }).promise;
-      const bitmap = await toBitmap(c);
-      putMainBitmap(key, { bitmap, cssW: Math.floor(vp.width), cssH: Math.floor(vp.height), devW: c.width, devH: c.height });
-    } catch (e) { /* prefetch is best-effort */ }
-  }
-  function schedulePrefetch(num, manual, manualScale, dpr, aw) {
-    clearTimeout(prefetchTimer);
-    const run = () => { prefetchMain(num + 1, manual, manualScale, dpr, aw); prefetchMain(num - 1, manual, manualScale, dpr, aw); };
-    if (typeof requestIdleCallback === "function") requestIdleCallback(run, { timeout: 600 });
-    else prefetchTimer = setTimeout(run, 180);
-  }
-  // Instant zoom: nudge the current bitmap with a CSS transform right away, then
-  // re-render crisply once the clicks settle (no main-thread render per click).
-  function zoomBy(factor) {
-    manualZoom = true;
-    const from = mainScale || 1;
-    targetScale = Math.min(Math.max((targetScale || from) * factor, 0.25), 6);
-    canvas.style.transformOrigin = "top center";
-    canvas.style.transform = "scale(" + (targetScale / from) + ")";
-    zoomLevel.textContent = Math.round(targetScale * 100) + "%";
-    clearTimeout(zoomTimer);
-    zoomTimer = setTimeout(() => { mainScale = targetScale; targetScale = 0; renderMain(pageNum); }, 130);
-  }
-
   async function renderMain(num) {
     const L = pageToLecture[num];
     if (!L) return;
@@ -293,28 +243,6 @@
       showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
       return;
     }
-    const dpr = computeDpr();
-    const aw = availW();
-
-    // fast path: this page is already cached at the scale we'd render it → blit it
-    if (pageBaseW.has(num)) {
-      const fScale = manualZoom && mainScale ? mainScale : aw / pageBaseW.get(num);
-      const hit = mainBitmapCache.get(mainKey(num, fScale, dpr));
-      if (hit) {
-        ++viewToken; // supersede any in-flight render
-        if (mainRenderTask) { try { mainRenderTask.cancel(); } catch (e) {} mainRenderTask = null; }
-        frameLecture = L.num; // keep the loading-gate consistent with what's on screen
-        mainScale = fScale;
-        putMainBitmap(mainKey(num, fScale, dpr), hit); // bump LRU recency
-        drawMainBitmap(hit);
-        zoomLevel.textContent = Math.round(fScale * 100) + "%";
-        curMainPage = num; curMainCW = hit.cssW; curMainCH = hit.cssH;
-        schedulePrefetch(num, manualZoom, mainScale, dpr, aw);
-        return;
-      }
-    }
-
-    // slow path: render with pdf.js, then cache the result for instant revisit
     const token = ++viewToken;
     if (frameLecture !== L.num) { loadingEl.hidden = false; viewerError.hidden = true; pageWrap.hidden = true; }
     let doc;
@@ -339,13 +267,13 @@
     }
     if (token !== viewToken) return;
 
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const base = page.getViewport({ scale: 1 });
-    pageBaseW.set(num, base.width);
-    const scale = manualZoom && mainScale ? mainScale : aw / base.width;
+    const avail = Math.max(canvasScroll.clientWidth - 48, 240);
+    const scale = manualZoom && mainScale ? mainScale : avail / base.width;
     mainScale = scale;
     const vp = page.getViewport({ scale });
     const cw = Math.floor(vp.width), ch = Math.floor(vp.height);
-    canvas.style.transform = "";
     canvas.width = Math.floor(vp.width * dpr);
     canvas.height = Math.floor(vp.height * dpr);
     canvas.style.width = cw + "px"; canvas.style.height = ch + "px";
@@ -368,13 +296,6 @@
     zoomLevel.textContent = Math.round(scale * 100) + "%";
     curMainPage = num; curMainCW = cw; curMainCH = ch;
     drawMainHighlights(num, cw, ch);
-
-    // cache this render — snapshot synchronously, navigation may repaint next tick
-    const snap = document.createElement("canvas");
-    snap.width = canvas.width; snap.height = canvas.height;
-    snap.getContext("2d").drawImage(canvas, 0, 0);
-    toBitmap(snap).then((bitmap) => putMainBitmap(mainKey(num, scale, dpr), { bitmap, cssW: cw, cssH: ch, devW: snap.width, devH: snap.height })).catch(() => {});
-    schedulePrefetch(num, manualZoom, scale, dpr, aw);
   }
 
   // In-page match overlay was removed: the pdf.js text-item boxes only
@@ -389,7 +310,6 @@
   }
 
   function goToPage(num) {
-    clearTimeout(zoomTimer); targetScale = 0; // cancel a pending zoom commit — we're navigating
     num = Math.max(1, Math.min(pdfTotal, num | 0));
     pageNum = num;
     pageInput.value = num;
@@ -513,7 +433,7 @@
     qInput.focus();
   }
 
-  // ---- images: pasted screenshots + rendered slide pictures (vision) --------
+  // ---- pasted screenshots ---------------------------------------------------
   // Downscale a pasted image blob → {media_type, data(base64, no prefix), dataUrl}.
   function processImageBlob(blob, maxDim) {
     return new Promise((resolve, reject) => {
@@ -550,14 +470,42 @@
   async function runAsk() {
     const q = qInput.value.trim();
     const imgs = pendingImages.slice();              // screenshots the user pasted
-    if ((!q && !imgs.length) || aiStreaming) return;
+    if ((!q && !imgs.length) || aiStreaming || !engine) return;
     setAiBusy(true);
+    const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
     let assistantTurn = null;
 
     try {
-      const built = window.TutorMessageBuilder.buildTutorMessage(q, imgs);
-      const textPart = built.text;
-      const messages = built.messages;
+      const provider = isImageAsk ? "haiku" : "glm";
+
+      // BM25 slide text is for TEXT questions only.
+      // A pasted screenshot is self-contained, so we send just the image — no slides.
+      let citationSlides = [];
+      let slidesText = "";
+      if (q && !isImageAsk) {
+        const res = engine.search(q, { limit: 12 });
+        const pickedSlides = res.results.slice(0, 12);
+        citationSlides = pickedSlides.map((r) => data.slides[r.docId]).filter(Boolean);
+        slidesText = pickedSlides.map((r) =>
+          "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
+          (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
+        ).join("\n\n");
+      }
+
+      // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
+      let textPart;
+      if (isImageAsk) {
+        textPart = (q ? q + "\n\n" : "") +
+          "Das Bild enthält den gesamten Kontext der Aufgabe/Frage. Löse bzw. beantworte sie vollständig und " +
+          "STRUKTURIERT: gliedere mit klaren Überschriften/Abschnitten, gib je Schritt eine kurze Begründung, " +
+          "und schließe mit einem knappen Ergebnis. Nutze Listen, nummerierte Schritte oder eine Tabelle, wo es passt.";
+      } else {
+        textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "");
+      }
+
+      // neutral content blocks: text, then pasted images
+      const blocks = [{ type: "text", text: textPart }];
+      for (const im of imgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
 
       aiThread = [];            // no history — each question is standalone
       aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
@@ -566,6 +514,9 @@
       pendingImages = []; renderPendingImages();
       openChat();
       renderThread();
+
+      // payload: a single fresh turn (text + any images), no prior conversation is sent
+      const messages = [{ role: "user", content: blocks }];
 
       assistantTurn = aiThread[aiThread.length - 1];
       let acc = "", pending = false;
@@ -580,7 +531,7 @@
       const resp = await fetch("q", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages }),
+        body: JSON.stringify({ provider: provider, messages }),
       });
       if (!resp.ok || !resp.body) {
         const e = await resp.json().catch(() => ({}));
@@ -596,6 +547,11 @@
         if (!pending) { pending = true; requestAnimationFrame(flush); }
       }
       assistantTurn.content = acc || "_(keine Antwort)_";
+      try {
+        if (typeof SlideSearchEngine !== "undefined" && typeof SlideSearchEngine.verifyCitations === "function") {
+          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides);
+        }
+      } catch (e) {}
       if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); wireSlideRefs(streamBodyEl); }
     } catch (e) {
       if (assistantTurn) {
@@ -650,12 +606,13 @@
   // minimal, safe Markdown -> HTML (escapes everything; tolerant of partial input)
   function renderMarkdown(src) {
     if (!src) return "";
+    const SLIDE_REF_RE = /\b(Folien?|Slides?|S\.?)\s*(\d+(?:\s*(?:[,;/&]|und|and)\s*(?:(?:Folien?|Slides?|S\.?)\s*)?\d+)*)/g;
     const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
     let html = "", listType = null, inCode = false, codeBuf = [], para = [];
     function inline(t) {
       t = esc(t);
-      t = t.replace(/\b(Folien?|Slides?|S\.)\s*(\d{1,3}(?:\s*(?:[,;/&]|und|and)\s*\d{1,3})*)/g, function (m, kw, nums) {
-        return kw + " " + nums.replace(/\d{1,3}/g, function (n) { return '<a class="nt-ref" data-page="' + n + '">' + n + "</a>"; });
+      t = t.replace(SLIDE_REF_RE, function (m, kw, nums) {
+        return kw + " " + nums.replace(/\d+/g, function (n) { return '<a class="nt-ref" data-page="' + n + '">' + n + "</a>"; });
       });
       return t
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
@@ -709,10 +666,14 @@
   // ---- stealth: typed commands in the search box (start with ":") ----------
   function handleSecretCommand(v) {
     const raw = v.slice(1).toLowerCase().trim();
+    const cmd = normalizeProviderName(raw);   // legacy provider names are aliases for GLM
     if (raw === "ai") { toggleAiBar(); }
     else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
     else if (raw === "close") { closeChat(); return; }
-    else { showAiToast(":" + raw + " ?"); }
+    else if (AI_PROVIDERS.indexOf(cmd) !== -1) {
+      selectProvider(cmd);
+      showAiToast(aiProviderSel.options[aiProviderSel.selectedIndex].text);
+    } else { showAiToast(":" + raw + " ?"); }
     qInput.value = ""; onInput();
   }
   function toggleAiBar() {
@@ -741,7 +702,7 @@
         hideSearch();
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
-        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :codex, :sonnet, :grok, :deepseek
+        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :glm (legacy names alias to GLM)
         if (e.ctrlKey || e.metaKey || pendingImages.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot is attached
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }
@@ -761,6 +722,7 @@
       }
       renderPendingImages();
     });
+    aiProviderSel.addEventListener("change", () => { selectProvider(aiProviderSel.value); });
     examplesEl.querySelectorAll(".chip").forEach((chip) => {
       chip.addEventListener("click", () => { qInput.value = chip.textContent; clearBtn.hidden = false; runSearch(); qInput.focus(); });
     });
@@ -771,9 +733,9 @@
     pageInput.addEventListener("keydown", (e) => { if (e.key === "Enter") goToPage(parseInt(pageInput.value, 10) || 1); });
     lectureSelect.addEventListener("change", () => { const v = parseInt(lectureSelect.value, 10); if (v) goToPage(v); });
 
-    zoomInBtn.addEventListener("click", () => zoomBy(1.2));
-    zoomOutBtn.addEventListener("click", () => zoomBy(1 / 1.2));
-    fitBtn.addEventListener("click", () => { manualZoom = false; targetScale = 0; clearTimeout(zoomTimer); canvas.style.transform = ""; renderMain(pageNum); });
+    zoomInBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) * 1.2; renderMain(pageNum); });
+    zoomOutBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) / 1.2; renderMain(pageNum); });
+    fitBtn.addEventListener("click", () => { manualZoom = false; renderMain(pageNum); });
     let resizeTimer = null;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);

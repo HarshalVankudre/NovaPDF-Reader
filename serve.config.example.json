@@ -1,7 +1,9 @@
 {
-  "_comment": "Copy this file to serve.config.json and fill in your OpenRouter key. serve.config.json is gitignored. Prefer the OPENROUTER_API_KEY environment variable if you can — it never touches disk. Restart the server after changing the key. The tutor uses Qwen 3.5 Flash with reasoning disabled for low latency.",
+  "_comment": "Copy this file to serve.config.json and fill in the keys you have. Prefer OPENROUTER_API_KEY and ANTHROPIC_API_KEY environment variables, or local .env/.env.txt entries. Restart after changing keys.",
   "openrouterApiKey": "sk-or-...",
+  "anthropicApiKey": "sk-ant-...",
   "models": {
-    "tutor": "qwen/qwen3.5-flash-02-23"
+    "glm": "z-ai/glm-5.2",
+    "haiku": "claude-haiku-4-5"
   }
 }

@@ -5,7 +5,11 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const zlib = require("zlib");
+const {
+  createLLMConfig,
+  selectProviderForMessages,
+  buildOpenAIRequestBody,
+} = require("./llm-config");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -24,38 +28,6 @@ const MIME = {
   ".woff2": "font/woff2",
   ".map": "application/json",
 };
-
-// ---- caching + compression -------------------------------------------------
-// Text assets are gzipped; everything carries a validator so the browser can
-// revalidate cheaply (304) instead of re-downloading. Vendored libs and the
-// immutable PDFs cache hard; source files revalidate so edits show on refresh.
-const COMPRESSIBLE = new Set([".html", ".js", ".css", ".json", ".svg", ".map"]);
-function cacheControlFor(filePath) {
-  const base = path.basename(filePath).toLowerCase();
-  const ext = path.extname(filePath).toLowerCase();
-  if (ext === ".pdf" || base === "pdf.min.js" || base === "pdf.worker.min.js") {
-    // 30 days — vendored / immutable content. Not "immutable": kept revalidatable
-    // so an explicit reload still picks up a replaced file via its ETag.
-    return "public, max-age=2592000";
-  }
-  return "no-cache"; // index.html, app.js, search-engine.js, style.css, slides.json
-}
-function etagFor(st, gzip) {
-  return '"' + st.size.toString(16) + "-" + Math.floor(st.mtimeMs).toString(16) + (gzip ? "-gz" : "") + '"';
-}
-// encodingSensitive: for a `Vary: Accept-Encoding` (compressible) response, an
-// If-Modified-Since alone can't tell gzip from identity, so only trust the ETag.
-function notModified(req, etag, lastModified, encodingSensitive) {
-  const inm = req.headers["if-none-match"];
-  if (inm) return inm.split(",").some((t) => { t = t.trim().replace(/^W\//, ""); return t === etag || t === "*"; });
-  if (encodingSensitive) return false;
-  const ims = req.headers["if-modified-since"];
-  if (ims && lastModified) {
-    const since = Date.parse(ims);
-    return !Number.isNaN(since) && Math.floor(lastModified.getTime() / 1000) <= Math.floor(since / 1000);
-  }
-  return false;
-}
 
 function sendJson(res, code, obj) {
   if (res.writableEnded) return;
@@ -149,18 +121,9 @@ function loadConfig() {
   return {};
 }
 const CONFIG = loadConfig();
-const M = CONFIG.models || {};
-// Single AI provider: Qwen 3.5 Flash (reasoning disabled) via OpenRouter. The browser
-// never sees the key — it POSTs to /q (or /llm) and this server calls OpenRouter.
-const API_KEY = process.env.OPENROUTER_API_KEY || CONFIG.openrouterApiKey || "";
-const TUTOR = {
-  label: "Qwen 3.5 Flash",
-  model: M.tutor || M.grok || "qwen/qwen3.5-flash-02-23",
-  url: process.env.OPENROUTER_API_URL || "https://openrouter.ai/api/v1/chat/completions",
-  envHint: "OPENROUTER_API_KEY",
-  params: { reasoning: { effort: "none" } },
-  headers: { "HTTP-Referer": "http://localhost:" + PORT, "X-Title": "Notizen" },
-};
+const LLM = createLLMConfig(ROOT, CONFIG);
+const KEYS = LLM.keys;
+const PROVIDERS = LLM.providers;
 
 const SYSTEM_PROMPT =
   'You are a precise study assistant for the German university database course ' +
@@ -193,17 +156,31 @@ function parseAnswer(raw) {
   return { answer: String(obj.answer == null ? "" : obj.answer).trim(), slides };
 }
 
+async function askAnthropic(p, key, system, user) {
+  let Anthropic;
+  try { Anthropic = require("@anthropic-ai/sdk"); }
+  catch (e) { const err = new Error("Anthropic SDK missing - run: npm install @anthropic-ai/sdk"); err.status = 500; throw err; }
+  const client = new Anthropic({ apiKey: key });
+  const msg = await client.messages.create({
+    model: p.model,
+    max_tokens: 1024,
+    system,
+    messages: [{ role: "user", content: user }],
+  });
+  const text = (msg.content || []).filter((b) => b.type === "text").map((b) => b.text).join("");
+  return { raw: text, model: msg.model || p.model };
+}
+
 async function askOpenAICompatible(p, key, system, user) {
   const resp = await fetch(p.url, {
     method: "POST",
-    headers: Object.assign({ Authorization: "Bearer " + key, "Content-Type": "application/json" }, p.headers || {}),
-    body: JSON.stringify(Object.assign({
-      model: p.model,
+    headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify(buildOpenAIRequestBody(p, {
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       max_tokens: 1024,
       temperature: 0.2,
       response_format: { type: "json_object" },
-    }, p.params || {})),
+    })),
   });
   if (!resp.ok) {
     const t = await resp.text().catch(() => "");
@@ -217,23 +194,25 @@ async function askOpenAICompatible(p, key, system, user) {
 }
 
 async function askLLM(question, candidates) {
-  if (!API_KEY) {
-    const e = new Error("No API key for " + TUTOR.label + ". Set " + TUTOR.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
+  const p = PROVIDERS.glm;
+  const key = KEYS.glm;
+  if (!key) {
+    const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
   }
   const user = buildUserPrompt(question, candidates);
   const t0 = Date.now();
-  const out = await askOpenAICompatible(TUTOR, API_KEY, SYSTEM_PROMPT, user);
+  const out = p.kind === "anthropic" ? await askAnthropic(p, key, SYSTEM_PROMPT, user) : await askOpenAICompatible(p, key, SYSTEM_PROMPT, user);
   const parsed = parseAnswer(out.raw);
-  return { answer: parsed.answer, slides: parsed.slides, model: out.model, label: TUTOR.label, ms: Date.now() - t0 };
+  return { answer: parsed.answer, slides: parsed.slides, model: out.model, label: p.label, ms: Date.now() - t0 };
 }
 
 // ---- streaming tutor chat ----
 const CHAT_SYSTEM =
   'You are an expert tutor for the German university database course "DSCB140 - Datenbanken & Datenkunde". ' +
-  'Answer the student\'s question directly in the SAME language as the question. You may receive a screenshot ' +
-  'the student pasted (e.g. an exam question or a diagram) - read it and answer it directly. ' +
-  'For greetings or casual conversation, respond naturally and briefly. ' +
+  'Answer using ONLY the provided slide excerpts (some may also be given as images), in the SAME language ' +
+  'as the question. You may also receive a screenshot the student pasted (e.g. an exam question or a diagram) - ' +
+  'read it and answer it directly. ' +
   'Match the answer length to what the question genuinely needs - no more, no less. ' +
   'For a simple, factual, or multiple-choice question: reply with ONLY the answer - a single short sentence ' +
   '(for multiple choice, just the correct option), and no explanation or justification unless the student ' +
@@ -242,12 +221,22 @@ const CHAT_SYSTEM =
   'things - give a COMPLETE answer using short bullets, numbered steps, or a fenced ```sql block as ' +
   'appropriate, and never cut it off mid-thought. In all cases stay tight: no preamble, no restating the ' +
   'question, no summary or sign-off, no padding. Default to concise; expand only when the content truly ' +
-  'requires it. Use **bold** for key terms. NEVER mention being an AI, a model, or that this text is generated - ' +
-  'write as if it were the course\'s own notes. For substantive questions, do not add a greeting or preamble. ' +
-  'Never say "as an AI".';
+  'requires it. Use **bold** for key terms. Cite the slide you used inline as "(Folie N)" with the global ' +
+  'page number from the context. ' +
+  'If the slides do not contain the answer, say so in one short sentence. NEVER mention being an AI, a model, ' +
+  'or that this text is generated - write as if it were the course\'s own notes. No greetings, no "as an AI".';
 
-// Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to
-// OpenAI's wire format. Plain-string content is passed through untouched.
+// Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to each
+// provider's wire format. Plain-string content is passed through untouched.
+function toClaudeMessages(messages) {
+  return messages.map((m) => {
+    if (typeof m.content === "string" || !Array.isArray(m.content)) return m;
+    return { role: m.role, content: m.content.map((b) =>
+      b && b.type === "image"
+        ? { type: "image", source: { type: "base64", media_type: b.media_type || "image/png", data: b.data } }
+        : { type: "text", text: (b && b.text) || "" }) };
+  });
+}
 function toOpenAIMessages(messages) {
   return messages.map((m) => {
     if (typeof m.content === "string" || !Array.isArray(m.content)) return m;
@@ -258,15 +247,25 @@ function toOpenAIMessages(messages) {
   });
 }
 
+async function streamAnthropic(p, key, messages, res) {
+  let Anthropic;
+  try { Anthropic = require("@anthropic-ai/sdk"); }
+  catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
+  const client = new Anthropic({ apiKey: key });
+  const stream = client.messages.stream({ model: p.model, max_tokens: 2048, system: CHAT_SYSTEM, messages: toClaudeMessages(messages) });
+  stream.on("text", (t) => { try { res.write(t); } catch (e) {} });
+  const fm = await stream.finalMessage();
+  if (fm && fm.stop_reason === "max_tokens") { try { res.write("\n\n… (gekürzt)"); } catch (e) {} }
+}
+
 async function streamOpenAICompatible(p, key, messages, res) {
   const resp = await fetch(p.url, {
     method: "POST",
-    headers: Object.assign({ Authorization: "Bearer " + key, "Content-Type": "application/json" }, p.headers || {}),
-    body: JSON.stringify(Object.assign({
-      model: p.model,
+    headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+    body: JSON.stringify(buildOpenAIRequestBody(p, {
       messages: [{ role: "system", content: CHAT_SYSTEM }].concat(toOpenAIMessages(messages)),
-      max_tokens: 2048, temperature: 0.3,
-    }, p.params || {}, { stream: true })),
+      max_tokens: 2048, temperature: 0.3, stream: true,
+    })),
   });
   if (!resp.ok || !resp.body) {
     const t = await resp.text().catch(() => "");
@@ -296,8 +295,12 @@ async function streamOpenAICompatible(p, key, messages, res) {
 }
 
 async function streamChat(messages, res) {
-  if (!API_KEY) throw Object.assign(new Error("No API key for " + TUTOR.label + ". Set " + TUTOR.envHint + " or add it to serve.config.json, then restart."), { status: 400 });
-  return streamOpenAICompatible(TUTOR, API_KEY, messages, res);
+  const provider = selectProviderForMessages(messages);
+  const p = PROVIDERS[provider];
+  const key = KEYS[provider];
+  if (!key) throw Object.assign(new Error("No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart."), { status: 400 });
+  if (p.kind === "anthropic") return streamAnthropic(p, key, messages, res);
+  return streamOpenAICompatible(p, key, messages, res);
 }
 
 const server = http.createServer((req, res) => {
@@ -315,20 +318,10 @@ const server = http.createServer((req, res) => {
     const fp = path.join(ROOT, "assets", "lectures", "vl" + lec[1] + ".pdf");
     return fs.stat(fp, (err, st) => {
       if (err || !st.isFile()) { res.writeHead(404); console.log("404 lec", lec[1]); return res.end("no lecture"); }
-      // Lecture PDFs rarely change → cache hard so re-opening a lecture is instant,
-      // but keep them revalidatable (ETag) so a rebuilt PDF is picked up on reload.
-      const lastModified = st.mtime;
-      const etag = etagFor(st, false);
-      if (notModified(req, etag, lastModified)) {
-        res.writeHead(304, { ETag: etag, "Last-Modified": lastModified.toUTCString(), "Cache-Control": "public, max-age=2592000" });
-        return res.end();
-      }
       res.writeHead(200, {
         "Content-Type": "text/plain; charset=x-user-defined",
         "Content-Length": st.size,
-        "Cache-Control": "public, max-age=2592000",
-        ETag: etag,
-        "Last-Modified": lastModified.toUTCString(),
+        "Cache-Control": "no-cache",
       });
       console.log("GET /lec/" + lec[1] + " -> 200 (" + st.size + " bytes, text/plain)");
       if (req.method === "HEAD") return res.end();
@@ -342,7 +335,7 @@ const server = http.createServer((req, res) => {
     readJsonBody(req, res, 4e6, async (payload) => {
       const { question, candidates } = payload || {};
       if (!question || !Array.isArray(candidates)) return sendJson(res, 400, { error: "Missing question or candidates" });
-      console.log("POST /llm  candidates=" + candidates.length);
+      console.log("POST /llm  provider=glm  candidates=" + candidates.length);
       try {
         const result = await askLLM(String(question), candidates);
         sendJson(res, 200, result);
@@ -360,8 +353,10 @@ const server = http.createServer((req, res) => {
     readJsonBody(req, res, 30e6, async (payload) => {
       const messages = payload && payload.messages;
       if (!Array.isArray(messages) || !messages.length) return sendJson(res, 400, { error: "Missing messages" });
-      if (!API_KEY) return sendJson(res, 400, { error: "No API key for " + TUTOR.label + ". Set " + TUTOR.envHint + " or add it to serve.config.json, then restart the server." });
-      console.log("POST /q  turns=" + messages.length);
+      const provider = selectProviderForMessages(messages);
+      const p = PROVIDERS[provider];
+      if (!KEYS[provider]) return sendJson(res, 400, { error: "No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart the server." });
+      console.log("POST /q  provider=" + provider + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       try {
         await streamChat(messages, res);
@@ -383,22 +378,8 @@ const server = http.createServer((req, res) => {
 
   fs.stat(filePath, (err, st) => {
     if (err || !st.isFile()) { res.writeHead(404); console.log("404", urlPath); return res.end("Not found: " + urlPath); }
-    const ext = path.extname(filePath).toLowerCase();
-    const type = MIME[ext] || "application/octet-stream";
+    const type = MIME[path.extname(filePath).toLowerCase()] || "application/octet-stream";
     const range = req.headers.range;
-    const acceptsGzip = /\bgzip\b/.test(req.headers["accept-encoding"] || "");
-    const willGzip = !range && acceptsGzip && COMPRESSIBLE.has(ext) && st.size > 0;
-    const cacheControl = cacheControlFor(filePath);
-    const lastModified = st.mtime;
-    const etag = etagFor(st, willGzip);
-
-    // Unchanged since the client's cached copy → 304, no body. (Range requests
-    // keep their own conditional semantics; revalidate those the normal way.)
-    if (!range && notModified(req, etag, lastModified, COMPRESSIBLE.has(ext))) {
-      res.writeHead(304, { ETag: etag, "Last-Modified": lastModified.toUTCString(), "Cache-Control": cacheControl, Vary: "Accept-Encoding" });
-      return res.end();
-    }
-
     const tag = `${req.method} ${urlPath}${range ? " [" + range + "]" : ""}`;
     let sent = 0;
     res.on("close", () => console.log(`${tag} -> ${res.statusCode} sent=${sent}/${st.size}${res.writableFinished ? "" : " ABORTED"}`));
@@ -415,35 +396,16 @@ const server = http.createServer((req, res) => {
         "Content-Range": `bytes ${start}-${end}/${st.size}`,
         "Accept-Ranges": "bytes",
         "Content-Length": end - start + 1,
-        "Cache-Control": cacheControl,
-        ETag: etag,
-        "Last-Modified": lastModified.toUTCString(),
+        "Cache-Control": "no-cache",
       });
       if (req.method === "HEAD") return res.end();
       count(fs.createReadStream(filePath, { start, end }).on("error", onErr)).pipe(res);
-    } else if (willGzip) {
-      // Compressed text asset: stream through gzip (chunked, no Content-Length).
-      res.writeHead(200, {
-        "Content-Type": type,
-        "Content-Encoding": "gzip",
-        "Cache-Control": cacheControl,
-        ETag: etag,
-        "Last-Modified": lastModified.toUTCString(),
-        Vary: "Accept-Encoding",
-      });
-      if (req.method === "HEAD") return res.end();
-      const gz = zlib.createGzip();
-      gz.on("error", onErr);
-      count(fs.createReadStream(filePath).on("error", onErr)).pipe(gz).pipe(res);
     } else {
       res.writeHead(200, {
         "Content-Type": type,
         "Content-Length": st.size,
         "Accept-Ranges": "bytes",
-        "Cache-Control": cacheControl,
-        ETag: etag,
-        "Last-Modified": lastModified.toUTCString(),
-        Vary: "Accept-Encoding",
+        "Cache-Control": "no-cache",
       });
       if (req.method === "HEAD") return res.end();
       count(fs.createReadStream(filePath).on("error", onErr)).pipe(res);
@@ -455,6 +417,6 @@ server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} }
 server.listen(PORT, () => {
   console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
   console.log(`serving ${ROOT}`);
-  console.log("LLM key present (Qwen 3.5 Flash via OpenRouter): " + !!API_KEY);
+  console.log("LLM keys present: glm=" + !!KEYS.glm + " haiku=" + !!KEYS.haiku);
   console.log("(Ctrl+C to stop)");
 });

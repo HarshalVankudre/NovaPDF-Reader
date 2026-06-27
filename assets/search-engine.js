@@ -454,5 +454,71 @@
   // expose helpers for tests / reuse
   SlideSearchEngine.fold = fold;
   SlideSearchEngine.contentTokens = contentTokens;
+
+  // --- citation verifier ---------------------------------------------------
+  // Verify "(Folie N)" citations in a model answer against the slide texts.
+  // A citation is kept only if page N exists in `slides` AND at least one
+  // content token of the claim sentence it attaches to appears on that slide.
+  // Unsupported citations are silently removed; the claim text is preserved.
+  // Best-effort: on any error returns the original answer unchanged.
+  function slideTextForPage(slides, page) {
+    for (let i = 0; i < slides.length; i++) {
+      if (slides[i] && Number(slides[i].page) === page) return slides[i].text || "";
+    }
+    return null;
+  }
+  // content tokens of the claim sentence that precedes a citation at citeStart
+  function claimTokensFor(answer, citeStart) {
+    const before = answer.slice(0, citeStart);
+    const m = /[.!?\n][^.!?\n]*$/.exec(before);
+    const sentStart = m ? m.index + 1 : 0;
+    const sent = answer.slice(sentStart, citeStart);
+    return contentTokens(sent).filter((t) => t && t.length >= 2);
+  }
+  function verifyCitations(answerText, slides) {
+    try {
+      if (typeof answerText !== "string" || !answerText) return answerText == null ? "" : String(answerText);
+      if (!Array.isArray(slides)) return answerText;
+      const PAGE_REF = "(?:Folien?|Slides?|S\\.?)";
+      const CITE = new RegExp(
+        "\\(?\\s*" + PAGE_REF + "\\s*(\\d+(?:\\s*(?:[,;/&]|und|and)\\s*(?:" + PAGE_REF + "\\s*)?\\d+)*)\\s*\\)?",
+        "gi"
+      );
+      let out = "";
+      let last = 0;
+      let m;
+      while ((m = CITE.exec(answerText)) !== null) {
+        const nums = m[1].match(/\d+/g).map(Number);
+        const spanStart = m.index;
+        const spanEnd = CITE.lastIndex;
+        const span = answerText.slice(spanStart, spanEnd);
+        const claimToks = claimTokensFor(answerText, spanStart);
+        const supportedNums = nums.filter((n) => {
+          const txt = slideTextForPage(slides, n);
+          if (txt == null) return false;            // missing page -> unsupported
+          if (!claimToks.length) return false;       // nothing to anchor -> unsupported
+          const slideToks = new Set(contentTokens(txt));
+          return claimToks.some((t) => slideToks.has(t));
+        });
+        out += answerText.slice(last, spanStart);
+        if (supportedNums.length === nums.length) {
+          out += span;                               // all supported -> keep whole span
+        } else if (supportedNums.length === 0) {
+          if (out.endsWith(" ")) out = out.replace(/\s+$/, ""); // none -> drop span (+ leading space)
+        } else {
+          const lead = /^\s/.test(span) && out && !/\s$/.test(out) ? " " : "";
+          out += lead + "(" + supportedNums.map((n) => "Folie " + n).join(", ") + ")"; // mixed -> keep good nums
+        }
+        last = spanEnd;
+      }
+      out += answerText.slice(last);
+      out = out.replace(/[ \t]{2,}/g, " ").replace(/\s+\)/g, ")").replace(/\(\s+/g, "(").replace(/[ \t]+$/gm, "");
+      return out;
+    } catch (e) {
+      return typeof answerText === "string" ? answerText : "";
+    }
+  }
+  SlideSearchEngine.verifyCitations = verifyCitations;
+
   return SlideSearchEngine;
 });

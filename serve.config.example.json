@@ -1,12 +1,7 @@
 {
-  "_comment": "Copy this file to serve.config.json and fill in the keys you have. serve.config.json is gitignored. Prefer environment variables (ANTHROPIC_API_KEY / XAI_API_KEY / DEEPSEEK_API_KEY) if you can — they never touch disk. Restart the server after changing keys.",
-  "anthropicApiKey": "sk-ant-...",
-  "xaiApiKey": "xai-...",
-  "deepseekApiKey": "sk-...",
+  "_comment": "Copy this file to serve.config.json and fill in your OpenRouter key. serve.config.json is gitignored. Prefer the OPENROUTER_API_KEY environment variable if you can — it never touches disk. Restart the server after changing the key. The tutor uses Qwen 3.5 Flash with reasoning disabled for low latency.",
+  "openrouterApiKey": "sk-or-...",
   "models": {
-    "codex": "claude-haiku-4-5",
-    "sonnet": "claude-sonnet-4-6",
-    "grok": "grok-4.3",
-    "deepseek": "deepseek-chat"
+    "tutor": "qwen/qwen3.5-flash-02-23"
   }
 }

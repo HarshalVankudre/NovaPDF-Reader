@@ -21,9 +21,7 @@
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "dependencies": {
-    "@anthropic-ai/sdk": "^0.104.2"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@yao-pkg/pkg": "^6.20.0"
   }

@@ -279,8 +279,8 @@ body.viewer-only .sidebar { display: none; }
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
 }
 .rc-snippet mark, .hl-pop mark {
-  background: var(--mark-bg); color: var(--mark-ink);
-  border-radius: 3px; padding: 0 2px; font-weight: 600;
+  background: rgba(255, 221, 0, .55); color: var(--ink);
+  border-radius: 3px; padding: 0 2px; font-weight: 700;
 }
 
 /* slide thumbnail (actual rendered slide) inside result cards */
@@ -300,10 +300,13 @@ body.viewer-only .sidebar { display: none; }
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .rc-canvas { position: relative; z-index: 1; width: 100%; height: auto; display: block; }
 .rc-hl { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
-.rc-hl .hl-box {
-  position: absolute; background: rgba(255, 211, 51, .45);
-  mix-blend-mode: multiply; border-radius: 1px;
-  box-shadow: 0 0 0 1px rgba(240, 180, 0, .3);
+/* yellow word-match highlight — shared by result thumbnails and the main viewer.
+   Positioned with CSS % (normalized coords) so it never drifts at zoom. */
+.hl-box {
+  position: absolute; background: rgba(255, 221, 0, .45);
+  mix-blend-mode: multiply; border-radius: 1.5px;
+  box-shadow: 0 0 0 1px rgba(228, 170, 0, .38);
+  pointer-events: none;
 }
 
 /* confidence cutoff: reveal the long tail */
@@ -351,6 +354,24 @@ body.viewer-only .sidebar { display: none; }
 .pg-img .rc-hl { position: absolute; inset: 0; z-index: 2; pointer-events: none; }
 .pg-num { font-size: 11px; color: var(--muted); font-weight: 600; margin-top: 4px; }
 .pg-thumb.active .pg-num { color: var(--green-darker); }
+
+/* rich result card (search mode): thumbnail with yellow matches + meta + snippet */
+.pg-thumb.result {
+  text-align: left; padding: 9px; margin-bottom: 9px;
+  border: 1px solid var(--border); border-radius: 10px; background: #fff;
+  transition: border-color .12s, box-shadow .12s;
+}
+.pg-thumb.result:hover { border-color: #cfd6dd; box-shadow: var(--shadow); }
+.pg-thumb.result.active { border-color: var(--green); background: #fbfffc; }
+.pg-thumb.result.active .pg-img { border-color: var(--green); box-shadow: none; }
+.rc-meta { margin-top: 8px; }
+.rc-meta .rc-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.rc-meta .rc-bar { margin-left: auto; width: 40px; height: 5px; border-radius: 3px; background: #edf0f3; overflow: hidden; flex: 0 0 auto; }
+.rc-meta .rc-bar > i { display: block; height: 100%; background: linear-gradient(90deg, var(--green), var(--green-dark)); border-radius: 3px; }
+.pg-thumb.result .rc-snippet {
+  font-size: 12px; color: var(--ink-soft); line-height: 1.45;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
 
 /* empty / no-results states */
 .state-msg {
@@ -412,12 +433,7 @@ body.viewer-only .sidebar { display: none; }
   border-radius: 3px; line-height: 0;
 }
 #pdfCanvas { display: block; border-radius: 3px; }
-.hl-layer { position: absolute; inset: 0; pointer-events: none; }
-.hl-layer .hl {
-  position: absolute; background: rgba(255, 214, 64, .42);
-  border-radius: 2px; mix-blend-mode: multiply;
-  box-shadow: 0 0 0 1px rgba(240,180,0,.35);
-}
+.hl-layer { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
 
 /* loading + error */
 .loading { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 14px; color: var(--muted); }
@@ -443,6 +459,60 @@ body.viewer-only .sidebar { display: none; }
   background: #cdd4db; border-radius: 8px; border: 3px solid transparent; background-clip: content-box;
 }
 .results::-webkit-scrollbar-thumb:hover, .canvas-scroll::-webkit-scrollbar-thumb:hover { background: #b3bcc6; background-clip: content-box; border: 3px solid transparent; }
+
+/* ---------------- SQL sandbox ---------------- */
+.sbx-backdrop { position: fixed; inset: 0; background: rgba(16, 24, 40, .28); z-index: 200; }
+.sbx-panel {
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(660px, 94vw);
+  background: #fff; z-index: 201; display: flex; flex-direction: column;
+  box-shadow: -8px 0 34px rgba(16, 24, 40, .20); border-left: 1px solid var(--border);
+}
+.sbx-panel.sbx-drag { outline: 2.5px dashed var(--green); outline-offset: -8px; }
+.sbx-head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--border-2); }
+.sbx-title { font-size: 14px; font-weight: 700; color: var(--ink); }
+.sbx-engine { font-size: 11.5px; font-weight: 700; padding: 3px 9px; border-radius: 999px; cursor: pointer; user-select: none; }
+.sbx-engine.ok { color: var(--green-darker); background: var(--green-tint); border: 1px solid var(--green-tint2); }
+.sbx-engine.warn { color: #8a6d00; background: #fff7da; border: 1px solid #f0e3a8; }
+.sbx-engine small { font-weight: 600; opacity: .82; }
+.sbx-x { margin-left: auto; border: 0; background: transparent; color: var(--muted-2); font-size: 20px; line-height: 1; width: 26px; height: 26px; border-radius: 6px; }
+.sbx-x:hover { background: #eef1f4; color: var(--ink-soft); }
+.sbx-tools { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-bottom: 1px solid var(--border-2); flex-wrap: wrap; }
+.sbx-btn { border: 0; border-radius: 8px; padding: 7px 13px; font-size: 12.5px; font-weight: 600; cursor: pointer;
+  background: linear-gradient(135deg, var(--green), var(--green-darker)); color: #fff; }
+.sbx-btn:hover { filter: brightness(1.06); }
+.sbx-btn.sbx-ghost { background: #fff; color: var(--ink-soft); border: 1.4px solid var(--border); }
+.sbx-btn.sbx-ghost:hover { border-color: var(--green); color: var(--green-darker); background: var(--green-tint); }
+.sbx-file { display: inline-flex; align-items: center; }
+.sbx-hint { font-size: 11.5px; color: var(--muted-2); margin-left: auto; }
+.sbx-editor {
+  flex: 0 0 auto; height: 33%; min-height: 110px; resize: vertical; border: 0; border-bottom: 1px solid var(--border-2);
+  padding: 12px 14px; font-family: var(--mono); font-size: 13px; line-height: 1.5; color: var(--ink); outline: 0; background: #fcfdfe;
+}
+.sbx-results { flex: 1 1 auto; overflow: auto; padding: 12px 14px 24px; background: #fff; }
+.sbx-empty, .sbx-dim { color: var(--muted-2); font-size: 12.5px; }
+.sbx-ok { color: var(--green-darker); font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+.sbx-err { color: #b4322a; font-size: 12.5px; white-space: pre-wrap; background: #fdecea; border: 1px solid #f5c6c0; border-radius: 8px; padding: 9px 11px; font-family: var(--mono); }
+.sbx-tablelist { font-size: 12px; color: var(--ink-soft); line-height: 1.8; }
+.sbx-tablelist code { background: var(--bg); padding: 1px 6px; border-radius: 5px; color: var(--green-darker); font-family: var(--mono); }
+.sbx-set { margin-bottom: 16px; }
+.sbx-tablewrap { overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+.sbx-table { border-collapse: collapse; font-size: 12.5px; width: 100%; }
+.sbx-table th, .sbx-table td { border-bottom: 1px solid var(--border-2); border-right: 1px solid var(--border-2); padding: 5px 9px; text-align: left; white-space: nowrap; vertical-align: top; }
+.sbx-table th { background: var(--bg); font-weight: 700; position: sticky; top: 0; }
+.sbx-table tr:nth-child(even) td { background: #fbfcfd; }
+.sbx-null { color: var(--muted-2); font-style: italic; }
+.sbx-count { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+.sbx-busy .sbx-run { opacity: .6; pointer-events: none; }
+
+/* tutor answer: Run button under a generated SQL block + its inline result */
+.nt-runbar { margin: -4px 0 9px; }
+.nt-run { border: 1px solid var(--green-tint2); border-radius: 7px; padding: 5px 12px; font-size: 12px; font-weight: 700;
+  cursor: pointer; background: var(--green-tint); color: var(--green-darker); }
+.nt-run:hover { background: var(--green-tint2); }
+.nt-run:disabled { opacity: .55; cursor: default; }
+.nt-sql-result { margin: 0 0 12px; }
+.nt-sql-result .sbx-table { font-size: 12px; }
+.nt-sql-result .sbx-tablewrap { max-height: 280px; }
 
 /* ---------------- responsive ---------------- */
 @media (max-width: 880px) {

@@ -35,10 +35,12 @@ function loadLocalEnv(root, target = process.env) {
 function createLLMConfig(root, config = {}, env = process.env) {
   loadLocalEnv(root, env);
   const models = config.models || {};
+  const anthropicKey = env.ANTHROPIC_API_KEY || config.anthropicApiKey || "";
   return {
     keys: {
       glm: env.OPENROUTER_API_KEY || env.OPEN_ROUTER_API_KEY || config.openrouterApiKey || "",
-      haiku: env.ANTHROPIC_API_KEY || config.anthropicApiKey || "",
+      sonnet: anthropicKey,
+      haiku: anthropicKey,
     },
     providers: {
       glm: {
@@ -48,12 +50,21 @@ function createLLMConfig(root, config = {}, env = process.env) {
         url: "https://openrouter.ai/api/v1/chat/completions",
         envHint: "OPENROUTER_API_KEY or OPEN_ROUTER_API_KEY",
         requestOptions: { provider: { sort: "throughput" } },
+        vision: false,
+      },
+      sonnet: {
+        label: "Claude Sonnet 4.6",
+        model: models.sonnet || "claude-sonnet-4-6",
+        kind: "anthropic",
+        envHint: "ANTHROPIC_API_KEY",
+        vision: true,
       },
       haiku: {
         label: "Haiku 4.5",
         model: models.haiku || "claude-haiku-4-5",
         kind: "anthropic",
         envHint: "ANTHROPIC_API_KEY",
+        vision: true,
       },
     },
   };
@@ -67,7 +78,20 @@ function messagesContainImage(messages) {
 }
 
 function selectProviderForMessages(messages) {
-  return messagesContainImage(messages) ? "haiku" : "glm";
+  return messagesContainImage(messages) ? "sonnet" : "glm";
+}
+
+// Ordered list of providers to try for a request. Images must go to a vision
+// model (modality enforcement), and quality matters most for exam diagrams, so
+// vision tries Sonnet then Haiku. Text-only tries the user's preferred provider
+// first (if valid), then GLM (fast) -> Claude as resilient fallbacks. The chain
+// is what makes a single API outage non-fatal on exam day.
+function providerChainForMessages(messages, preferred) {
+  if (messagesContainImage(messages)) return ["sonnet", "haiku"];
+  const base = ["glm", "sonnet", "haiku"];
+  const pref = String(preferred || "").trim().toLowerCase();
+  if (base.indexOf(pref) !== -1) return [pref].concat(base.filter((p) => p !== pref));
+  return base;
 }
 
 function buildOpenAIRequestBody(provider, fields) {
@@ -80,5 +104,6 @@ module.exports = {
   createLLMConfig,
   messagesContainImage,
   selectProviderForMessages,
+  providerChainForMessages,
   buildOpenAIRequestBody,
 };

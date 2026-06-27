@@ -1,9 +1,19 @@
 {
-  "_comment": "Copy this file to serve.config.json and fill in the keys you have. Prefer OPENROUTER_API_KEY and ANTHROPIC_API_KEY environment variables, or local .env/.env.txt entries. Restart after changing keys.",
+  "_comment": "Copy this file to serve.config.json and fill in what you have. Prefer OPENROUTER_API_KEY and ANTHROPIC_API_KEY environment variables, or local .env/.env.txt entries. Restart the server after changing anything here.",
   "openrouterApiKey": "sk-or-...",
   "anthropicApiKey": "sk-ant-...",
   "models": {
     "glm": "z-ai/glm-5.2",
+    "sonnet": "claude-sonnet-4-6",
     "haiku": "claude-haiku-4-5"
-  }
+  },
+  "_mysql_comment": "SQL sandbox: point this at your local MySQL/MariaDB so the sandbox runs exam-exact queries. If omitted or unreachable, the browser falls back to in-browser SQLite. Can also be set via MYSQL_HOST/MYSQL_PORT/MYSQL_USER/MYSQL_PASSWORD/MYSQL_DATABASE env vars. 'database' is the sandbox schema the importer (re)creates on each import. These values are also the DEFAULTS for mysql-to-sqlite.js (exam snapshot exporter).",
+  "mysql": {
+    "host": "127.0.0.1",
+    "port": 3306,
+    "user": "root",
+    "password": "",
+    "database": "sandbox"
+  },
+  "_ssl_comment": "For a remote/cloud exam DB over TLS, add an 'ssl' object inside 'mysql' (used by mysql-to-sqlite.js). Examples: {\"ssl\": true} for system CAs, {\"ssl\": {\"ca\": \"path/to/ca.pem\"}} with a CA file, or {\"ssl\": {\"rejectUnauthorized\": false}} for self-signed. On exam day you can instead pass --ssl / --ssl-ca / --ssl-insecure flags to the exporter."
 }

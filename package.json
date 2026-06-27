@@ -8,7 +8,8 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/engine.test.js && node tests/llm-config.test.js && node tests/client-provider.test.js && node tests/sql-util.test.js && node tests/server.test.js",
+    "snapshot": "node mysql-to-sqlite.js",
     "build:exe": "pkg . --output dist/NovaPDF-Reader.exe"
   },
   "pkg": {
@@ -22,7 +23,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.104.2"
+    "@anthropic-ai/sdk": "^0.104.2",
+    "mysql2": "^3.22.5",
+    "sql.js": "^1.14.1"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "^6.20.0"

@@ -4,12 +4,17 @@
  * byte ranges, method restrictions, and the disguised /lec endpoint.
  */
 const assert = require("assert");
+const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 
 const ROOT = path.join(__dirname, "..");
 const PORT = 18000 + Math.floor(Math.random() * 2000);
 const BASE = "http://127.0.0.1:" + PORT;
+// Isolate key loading from the developer's real serve.config.json / .env so the
+// "no key" path is deterministic regardless of local secrets.
+const EMPTY_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "db-slide-noconf-"));
 
 function waitForReady(child) {
   return new Promise((resolve, reject) => {
@@ -37,6 +42,7 @@ async function request(pathname, init) {
     cwd: ROOT,
     env: Object.assign({}, process.env, {
       PORT: String(PORT),
+      SLIDEFINDER_CONFIG_DIR: EMPTY_CONFIG_DIR,
       OPENROUTER_API_KEY: "",
       OPEN_ROUTER_API_KEY: "",
       ANTHROPIC_API_KEY: "",
@@ -99,12 +105,23 @@ async function request(pathname, init) {
         messages: [{ role: "user", content: [{ type: "text", text: "ACID?" }] }],
       }),
     });
-    assert.strictEqual(textRoute.status, 400, "text requests should validate the GLM key before streaming");
+    assert.strictEqual(textRoute.status, 400, "text requests should validate a usable key before streaming");
     assert.match((await textRoute.json()).error || "", /GLM 5\.2.*OPENROUTER_API_KEY/i);
+
+    const imageRoute = await request("/q", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [{ role: "user", content: [{ type: "image", media_type: "image/png", data: "abc" }] }],
+      }),
+    });
+    assert.strictEqual(imageRoute.status, 400, "image requests should validate the vision key before streaming");
+    assert.match((await imageRoute.json()).error || "", /Sonnet|ANTHROPIC_API_KEY/i);
 
     console.log("server regression checks passed");
   } finally {
     child.kill();
+    try { fs.rmSync(EMPTY_CONFIG_DIR, { recursive: true, force: true }); } catch (e) {}
   }
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : err);

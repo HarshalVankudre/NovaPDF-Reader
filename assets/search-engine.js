@@ -40,7 +40,7 @@
       "what when where who why which that this these those do does did with " +
       "without about as if then so it its you we they i me my your our their " +
       "can could should would will shall has have had not no only more very " +
-      "into at by from there here than such between each both all any some"
+      "into at by from there here than such each both all any some"
     ).split(/\s+/)
   );
 
@@ -92,6 +92,43 @@
     ["einfugen", "anlegen", "erstellen", "speichern", "hinzufugen"],
     ["andern", "bearbeiten", "anpassen"],
     ["index", "schneller", "performance", "beschleunigen", "suchbaum"],
+
+    // --- more exam concepts (VL3 modeling, VL6 DQL, VL7 integrity/transactions) ---
+    ["having", "gruppenbedingung", "gruppenebene"],
+    ["distinct", "eindeutige", "ohnedoppelte", "verschiedene"],
+    ["limit", "begrenzen", "obergrenze", "topn"],
+    ["alias", "aliasname", "umbenennen", "as"],
+    ["subquery", "unterabfrage", "subselect", "verschachtelt", "geschachtelt", "nested"],
+    ["inner", "innerjoin", "innerer"],
+    ["outer", "outerjoin", "ausserer", "left", "right", "leftjoin", "rightjoin"],
+    ["natural", "naturaljoin", "naturlich"],
+    ["cross", "crossjoin", "kartesisch", "kreuzprodukt"],
+    ["funktional", "abhangigkeit", "fd", "determiniert", "determinante"],
+    ["schlusselkandidat", "candidate", "candidatekey", "superschlussel", "superkey", "schlusselkandidaten"],
+    ["bcnf", "boyce", "codd", "boycecodd"],
+    ["erste", "1nf", "ersten", "atomar", "atomare"],
+    ["zweite", "2nf", "zweiten", "voll", "vollfunktional"],
+    ["dritte", "3nf", "dritten", "transitiv", "transitive"],
+    ["redundanz", "redundant", "anomalie", "anomalien", "redundanzen"],
+    ["referentiell", "referenziell", "referentielle", "fremdschlussel", "verweis"],
+    ["cascade", "kaskadierend", "ondelete", "onupdate", "kaskade"],
+    ["domane", "wertebereich", "domain", "definitionsbereich"],
+    ["commit", "bestatigen", "festschreiben", "abschliessen"],
+    ["savepoint", "sicherungspunkt", "zwischenstand"],
+    ["sperre", "lock", "sperren", "locking", "gesperrt"],
+    ["deadlock", "verklemmung", "verklemmungen"],
+    ["isolation", "isolationsebene", "isolationslevel", "isolationsgrad"],
+    ["mehrbenutzer", "concurrency", "nebenlaufig", "nebenlaufigkeit", "parallel"],
+    ["ddl", "datendefinition", "createtable", "definieren"],
+    ["dml", "datenmanipulation", "manipulieren"],
+    ["dql", "datenabfrage", "datenanfrage"],
+    ["between", "zwischen", "bereich"],
+    ["like", "muster", "wildcard", "platzhalter", "enthalt"],
+    ["check", "prufbedingung", "wertebedingung"],
+    ["default", "standardwert", "vorgabewert", "voreinstellung"],
+    ["autoincrement", "autovalue", "automatisch", "fortlaufend", "autoincrementwert"],
+    ["generalisierung", "spezialisierung", "vererbung", "isa", "supertyp", "subtyp"],
+    ["schwach", "schwacheentitat", "weak", "existenzabhangig"],
   ];
 
   // --- light, conservative suffix stemmer (DE + EN) -----------------------
@@ -173,6 +210,7 @@
       this.titleBoost = opts.titleBoost ?? 2.5; // BM25F-style field weight
       this.coverageWeight = opts.coverageWeight ?? 0.45;
       this.proximityWeight = opts.proximityWeight ?? 0.3;
+      this.phraseWeight = opts.phraseWeight ?? 0.6; // reward query words appearing in order
       this.prefixCap = opts.prefixCap ?? 16;
       this.rerankK = opts.rerankK ?? 60;
       this._build();
@@ -346,6 +384,30 @@
       return this.proximityWeight * (bestDistinct / cq.n) * (1 / (1 + bestSpan / 8));
     }
 
+    // Ordered-phrase bonus: longest contiguous run of doc tokens that matches a
+    // contiguous slice of the query *in the typed order* (variants count). A full
+    // in-order phrase match is the strongest possible signal for a multi-word query.
+    _phrase(docId, cq) {
+      if (cq.n < 2) return 0;
+      const toks = this.docTokens[docId];
+      let best = 0;
+      for (let i = 0; i < toks.length && best < cq.n; i++) {
+        const s0 = cq.term2qi.get(toks[i]);
+        if (!s0) continue;
+        for (const qi0 of s0) {
+          let len = 1, j = i + 1, qi = qi0 + 1;
+          while (j < toks.length && qi < cq.n) {
+            const sj = cq.term2qi.get(toks[j]);
+            if (sj && sj.has(qi)) { len++; j++; qi++; }
+            else break;
+          }
+          if (len > best) best = len;
+        }
+      }
+      if (best < 2) return 0;
+      return this.phraseWeight * ((best - 1) / (cq.n - 1)); // 0..phraseWeight
+    }
+
     search(query, opts = {}) {
       const limit = opts.limit ?? 40;
       const t0 = now();
@@ -390,7 +452,7 @@
       cands.sort((a, b) => b[1] - a[1]);
 
       const K = Math.min(cands.length, this.rerankK);
-      for (let i = 0; i < K; i++) cands[i][1] *= 1 + this._proximity(cands[i][0], cq);
+      for (let i = 0; i < K; i++) cands[i][1] *= 1 + this._proximity(cands[i][0], cq) + this._phrase(cands[i][0], cq);
       cands.sort((a, b) => b[1] - a[1]);
 
       const top = cands.slice(0, limit);

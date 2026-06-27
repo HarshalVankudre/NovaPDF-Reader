@@ -9,18 +9,23 @@ const app = fs.readFileSync(path.join(ROOT, "assets", "app.js"), "utf8");
 const select = html.match(/<select id="aiProvider"[\s\S]*?<\/select>/);
 assert.ok(select, "provider selector should exist");
 const options = select[0].match(/<option\b[^>]*>/g) || [];
-assert.strictEqual(options.length, 1, "provider selector should expose exactly one text model");
+assert.strictEqual(options.length, 3, "provider selector should expose GLM + Sonnet + Haiku");
 assert.match(select[0], /<option value="glm">GLM 5\.2<\/option>/);
+assert.match(select[0], /<option value="sonnet">Claude Sonnet 4\.6<\/option>/);
+assert.match(select[0], /<option value="haiku">Haiku 4\.5<\/option>/);
 
 assert.match(app, /const DEFAULT_PROVIDER = "glm";/);
-assert.match(app, /const AI_PROVIDERS = \["glm"\];/);
-assert.match(app, /const provider = isImageAsk \? "haiku" : "glm";/);
-assert.doesNotMatch(app, /VISION_PROVIDERS|providerCanUseVision/);
-assert.doesNotMatch(app, /getSlideImageForVision|slideImgs|VISION_SLIDES/);
-assert.doesNotMatch(select[0], /Sonnet|Grok|DeepSeek|Haiku|Codex/);
+assert.match(app, /const AI_PROVIDERS = \["glm", "sonnet", "haiku"\];/);
+// image asks hint the vision model; text asks honor the selected model (server still enforces modality)
+assert.match(app, /const provider = isImageAsk \? "sonnet" : \(aiProviderSel\.value \|\| DEFAULT_PROVIDER\);/);
+// vision grounding: typed questions attach rendered top-slide images unless :fast is on
+assert.match(app, /const VISION_SLIDES = 3;/);
+assert.match(app, /renderSlideForVision\(/);
+assert.match(app, /let fastMode = false;/);
 
-for (const alias of ["haiku", "claude", "codex", "sonnet", "grok", "deepseek"]) {
-  assert.match(app, new RegExp(alias + ': "glm"'), alias + " should remain a compatibility command");
+// aliased command names still resolve to a real provider
+for (const [alias, target] of [["claude", "sonnet"], ["opus", "sonnet"], ["codex", "glm"], ["grok", "glm"], ["deepseek", "glm"], ["gpt", "glm"]]) {
+  assert.match(app, new RegExp(alias + ': "' + target + '"'), alias + " should map to " + target);
 }
 
 const slideRefLiteral = app.match(/const SLIDE_REF_RE = (\/[^\n]+\/g);/);

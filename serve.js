@@ -8,8 +8,11 @@ const path = require("path");
 const {
   createLLMConfig,
   selectProviderForMessages,
+  providerChainForMessages,
+  messagesContainImage,
   buildOpenAIRequestBody,
 } = require("./llm-config");
+const SqlUtil = require("./assets/sql-util.js");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -26,6 +29,7 @@ const MIME = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
+  ".wasm": "application/wasm",
   ".map": "application/json",
 };
 
@@ -113,15 +117,19 @@ function parseByteRange(header, size) {
 // ===================== LLM proxy (keys stay server-side) =====================
 // API keys come from environment variables, or a gitignored serve.config.json.
 // The browser never sees a key — it POSTs to /llm and this server calls the LLM.
+// Keys/config are read from ROOT by default, but SLIDEFINDER_CONFIG_DIR lets you
+// keep secrets in a different folder (handy for tests and for keeping keys out of
+// the served directory entirely). Static files are always served from ROOT.
+const CONFIG_DIR = process.env.SLIDEFINDER_CONFIG_DIR ? path.resolve(process.env.SLIDEFINDER_CONFIG_DIR) : ROOT;
 function loadConfig() {
   try {
-    const p = path.join(ROOT, "serve.config.json");
+    const p = path.join(CONFIG_DIR, "serve.config.json");
     if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, "utf8"));
   } catch (e) { console.warn("serve.config.json parse error:", e.message); }
   return {};
 }
 const CONFIG = loadConfig();
-const LLM = createLLMConfig(ROOT, CONFIG);
+const LLM = createLLMConfig(CONFIG_DIR, CONFIG);
 const KEYS = LLM.keys;
 const PROVIDERS = LLM.providers;
 
@@ -247,60 +255,239 @@ function toOpenAIMessages(messages) {
   });
 }
 
-async function streamAnthropic(p, key, messages, res) {
+const FIRST_TOKEN_MS = 22000; // abort an attempt that produces no token in time -> fall back
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function streamAnthropic(p, key, messages, write, signal) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
-  const stream = client.messages.stream({ model: p.model, max_tokens: 2048, system: CHAT_SYSTEM, messages: toClaudeMessages(messages) });
-  stream.on("text", (t) => { try { res.write(t); } catch (e) {} });
+  const stream = client.messages.stream(
+    { model: p.model, max_tokens: 2048, system: CHAT_SYSTEM, messages: toClaudeMessages(messages) },
+    { signal, timeout: 120000 }
+  );
+  stream.on("text", (t) => { try { write(t); } catch (e) {} });
   const fm = await stream.finalMessage();
-  if (fm && fm.stop_reason === "max_tokens") { try { res.write("\n\n… (gekürzt)"); } catch (e) {} }
+  if (fm && fm.stop_reason === "max_tokens") { try { write("\n\n… (gekürzt)"); } catch (e) {} }
 }
 
-async function streamOpenAICompatible(p, key, messages, res) {
-  const resp = await fetch(p.url, {
-    method: "POST",
-    headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
-    body: JSON.stringify(buildOpenAIRequestBody(p, {
-      messages: [{ role: "system", content: CHAT_SYSTEM }].concat(toOpenAIMessages(messages)),
-      max_tokens: 2048, temperature: 0.3, stream: true,
-    })),
-  });
-  if (!resp.ok || !resp.body) {
-    const t = await resp.text().catch(() => "");
-    throw Object.assign(new Error(p.label + " error " + resp.status + ": " + t.slice(0, 200)), { status: resp.status === 401 ? 401 : 502 });
-  }
-  const reader = resp.body.getReader();
-  const dec = new TextDecoder();
-  let buf = "";
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf("\n")) >= 0) {
-      const line = buf.slice(0, nl).trim();
-      buf = buf.slice(nl + 1);
-      if (!line.startsWith("data:")) continue;
-      const dataStr = line.slice(5).trim();
-      if (dataStr === "[DONE]") return;
-      try {
-        const j = JSON.parse(dataStr);
-        const tok = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
-        if (tok) res.write(tok);
-      } catch (e) { /* keep-alive / partial */ }
+async function streamOpenAICompatible(p, key, messages, write, signal) {
+  let lastErr;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const resp = await fetch(p.url, {
+        method: "POST",
+        headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
+        body: JSON.stringify(buildOpenAIRequestBody(p, {
+          messages: [{ role: "system", content: CHAT_SYSTEM }].concat(toOpenAIMessages(messages)),
+          max_tokens: 2048, temperature: 0.3, stream: true,
+        })),
+        signal,
+      });
+      if (!resp.ok || !resp.body) {
+        const t = await resp.text().catch(() => "");
+        const status = resp.status;
+        const transient = status === 429 || (status >= 500 && status <= 599);
+        const err = Object.assign(new Error(p.label + " error " + status + ": " + t.slice(0, 200)), { status: status === 401 ? 401 : 502 });
+        if (transient && attempt === 0) { lastErr = err; await sleep(600); continue; } // one retry on rate-limit/5xx
+        throw err;
+      }
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;
+          const dataStr = line.slice(5).trim();
+          if (dataStr === "[DONE]") return;
+          try {
+            const j = JSON.parse(dataStr);
+            const tok = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
+            if (tok) write(tok);
+          } catch (e) { /* keep-alive / partial */ }
+        }
+      }
+      return;
+    } catch (e) {
+      lastErr = e;
+      if (e && e.name === "AbortError") throw e;            // first-token timeout -> let caller fall back
+      if (attempt === 0 && !(e && e.status)) { await sleep(600); continue; } // transient network error -> one retry
+      throw e;
     }
   }
+  throw lastErr || new Error("request failed");
 }
 
-async function streamChat(messages, res) {
-  const provider = selectProviderForMessages(messages);
-  const p = PROVIDERS[provider];
-  const key = KEYS[provider];
-  if (!key) throw Object.assign(new Error("No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart."), { status: 400 });
-  if (p.kind === "anthropic") return streamAnthropic(p, key, messages, res);
-  return streamOpenAICompatible(p, key, messages, res);
+function normalizeProvider(name) {
+  const r = String(name || "").trim().toLowerCase();
+  return PROVIDERS[r] ? r : null;
+}
+
+// Try each provider in the chain until one starts streaming tokens. A provider
+// that fails BEFORE emitting a token (error, 5xx, or first-token timeout) is
+// skipped and the next is tried; once tokens have been written we commit to that
+// provider (we can't un-send a partial answer). This is the exam-day safety net.
+async function streamWithFallback(payload, res) {
+  const messages = payload.messages;
+  const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
+  let wrote = false;
+  let lastErr = null;
+  for (let i = 0; i < chain.length; i++) {
+    const name = chain[i];
+    const p = PROVIDERS[name];
+    const key = KEYS[name];
+    if (!p || !key) { lastErr = Object.assign(new Error("No API key for " + (p ? p.label : name)), { status: 400 }); continue; }
+    const ctrl = new AbortController();
+    let got = false;
+    const write = (t) => { if (t == null || t === "") return; got = true; wrote = true; clearTimeout(timer); try { res.write(t); } catch (e) {} };
+    const timer = setTimeout(() => { if (!got) { try { ctrl.abort(); } catch (e) {} } }, FIRST_TOKEN_MS);
+    try {
+      console.log("POST /q  try[" + i + "]=" + name + " (" + p.model + ")");
+      if (p.kind === "anthropic") await streamAnthropic(p, key, messages, write, ctrl.signal);
+      else await streamOpenAICompatible(p, key, messages, write, ctrl.signal);
+      clearTimeout(timer);
+      return { provider: name };
+    } catch (e) {
+      clearTimeout(timer);
+      lastErr = e;
+      if (wrote) throw e; // already streamed -> cannot fall back to a clean answer
+      console.log("  provider " + name + " failed pre-stream: " + (e && e.message) + (i + 1 < chain.length ? " -> fallback" : ""));
+    }
+  }
+  throw lastErr || new Error("all providers failed");
+}
+
+// ===================== SQL sandbox (local MySQL bridge) =====================
+// Exam-day workflow: the student gets the DB ~5 min before, exports a dump, and
+// imports it here. Queries run against the real local MySQL (exam-exact dialect).
+// mysql2 is pure-JS and optional — if it's missing or MySQL is unreachable, the
+// browser silently falls back to an in-browser SQLite sandbox.
+let mysql2Lib = null;
+function getMysql() {
+  if (mysql2Lib === null) { try { mysql2Lib = require("mysql2/promise"); } catch (e) { mysql2Lib = false; } }
+  return mysql2Lib || null;
+}
+const MYSQL_CFG = (() => {
+  const m = (CONFIG && CONFIG.mysql) || {};
+  const e = process.env;
+  return {
+    host: e.MYSQL_HOST || m.host || "127.0.0.1",
+    port: parseInt(e.MYSQL_PORT || m.port || 3306, 10) || 3306,
+    user: e.MYSQL_USER || m.user || "root",
+    password: e.MYSQL_PASSWORD != null ? e.MYSQL_PASSWORD : (m.password != null ? m.password : ""),
+    database: e.MYSQL_DATABASE || m.database || "sandbox",
+  };
+})();
+const baseConn = () => ({ host: MYSQL_CFG.host, port: MYSQL_CFG.port, user: MYSQL_CFG.user, password: MYSQL_CFG.password, connectTimeout: 4000 });
+
+// Exam snapshot: a prebuilt SQLite file (from mysql-to-sqlite.js) the app auto-loads.
+const SNAPSHOT_PATH = process.env.SLIDEFINDER_SQLITE
+  ? path.resolve(process.env.SLIDEFINDER_SQLITE)
+  : ((CONFIG && CONFIG.sqliteSnapshot) ? path.resolve(ROOT, CONFIG.sqliteSnapshot) : path.join(ROOT, "data", "exam.sqlite"));
+
+let mysqlPool = null;
+function getPool() {
+  const lib = getMysql();
+  if (!lib) return null;
+  if (!mysqlPool) {
+    mysqlPool = lib.createPool(Object.assign(baseConn(), {
+      database: MYSQL_CFG.database, multipleStatements: true, waitForConnections: true, connectionLimit: 4,
+    }));
+  }
+  return mysqlPool;
+}
+function resetPool() { if (mysqlPool) { try { mysqlPool.end().catch(() => {}); } catch (e) {} mysqlPool = null; } }
+
+async function mysqlStatus() {
+  const lib = getMysql();
+  if (!lib) return { available: false, reason: "mysql2 not installed" };
+  let conn;
+  try {
+    conn = await lib.createConnection(baseConn());
+    const [[v]] = await conn.query("SELECT VERSION() AS v");
+    let tables = [];
+    try {
+      const [rows] = await conn.query("SELECT table_name AS t FROM information_schema.tables WHERE table_schema = ?", [MYSQL_CFG.database]);
+      tables = rows.map((r) => r.t);
+    } catch (e) {}
+    return { available: true, version: v.v, database: MYSQL_CFG.database, tables };
+  } catch (e) {
+    return { available: false, reason: (e && (e.code || e.message)) || "connect failed" };
+  } finally { try { if (conn) await conn.end(); } catch (e) {} }
+}
+
+async function mysqlSchema(conn) {
+  const db = MYSQL_CFG.database;
+  const runner = conn || getPool();
+  if (!runner) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
+  const [rows] = await runner.query(
+    "SELECT table_name AS t, column_name AS c, column_type AS ty FROM information_schema.columns WHERE table_schema = ? ORDER BY table_name, ordinal_position", [db]);
+  const map = new Map();
+  for (const r of rows) { if (!map.has(r.t)) map.set(r.t, []); map.get(r.t).push({ name: r.c, type: r.ty }); }
+  return [...map.entries()].map(([name, columns]) => ({ name, columns }));
+}
+
+async function mysqlImport(dumpText) {
+  const lib = getMysql();
+  if (!lib) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
+  const conn = await lib.createConnection(Object.assign(baseConn(), { multipleStatements: true }));
+  const db = MYSQL_CFG.database;
+  try {
+    await conn.query("DROP DATABASE IF EXISTS `" + db + "`");
+    await conn.query("CREATE DATABASE `" + db + "` CHARACTER SET utf8mb4");
+    await conn.query("USE `" + db + "`");
+    const cleaned = SqlUtil.stripDbStatements(dumpText);
+    try {
+      if (cleaned.trim()) await conn.query(cleaned); // fast path: one multi-statement batch
+    } catch (batchErr) {
+      // precise path: run statement-by-statement so we can name the offender
+      const stmts = SqlUtil.splitStatements(dumpText).filter((st) =>
+        !/^(CREATE\s+DATABASE|CREATE\s+SCHEMA|DROP\s+DATABASE|DROP\s+SCHEMA|USE|SET|LOCK\s+TABLES|UNLOCK\s+TABLES|\/\*)/i.test(st));
+      for (const st of stmts) {
+        try { await conn.query(st); }
+        catch (e2) { throw Object.assign(new Error("SQL-Import fehlgeschlagen bei: " + st.slice(0, 90).replace(/\s+/g, " ") + " … → " + e2.message), { status: 400 }); }
+      }
+    }
+    const schema = await mysqlSchema(conn);
+    const [counts] = await conn.query("SELECT table_name AS t, table_rows AS r FROM information_schema.tables WHERE table_schema = ?", [db]);
+    const rowMap = new Map(counts.map((r) => [r.t, Number(r.r) || 0]));
+    return { engine: "mysql", database: db, tables: schema.map((t) => ({ name: t.name, rows: rowMap.get(t.name) || 0, columns: t.columns })) };
+  } finally { try { await conn.end(); } catch (e) {} resetPool(); }
+}
+
+async function mysqlQuery(sql) {
+  const pool = getPool();
+  if (!pool) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
+  const stmts = SqlUtil.splitStatements(sql);
+  if (!stmts.length) return { engine: "mysql", sets: [] };
+  const conn = await pool.getConnection();
+  const sets = [];
+  try {
+    for (const st of stmts) {
+      const [res, fields] = await conn.query(st);
+      if (Array.isArray(res)) {
+        const columns = fields && fields.length ? fields.map((f) => f.name) : (res[0] ? Object.keys(res[0]) : []);
+        sets.push({ columns, rows: res.map((r) => columns.map((c) => normalizeCell(r[c]))), rowCount: res.length });
+      } else {
+        sets.push({ columns: ["Ergebnis"], rows: [["OK · " + (res.affectedRows != null ? res.affectedRows + " Zeile(n) betroffen" : "ausgeführt")]], rowCount: 0 });
+      }
+    }
+    return { engine: "mysql", sets };
+  } finally { conn.release(); }
+}
+function normalizeCell(v) {
+  if (v == null) return null;
+  if (v instanceof Date) return v.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
+  if (Buffer.isBuffer(v)) return v.toString("utf8");
+  if (typeof v === "object") return JSON.stringify(v);
+  return v;
 }
 
 const server = http.createServer((req, res) => {
@@ -353,18 +540,71 @@ const server = http.createServer((req, res) => {
     readJsonBody(req, res, 30e6, async (payload) => {
       const messages = payload && payload.messages;
       if (!Array.isArray(messages) || !messages.length) return sendJson(res, 400, { error: "Missing messages" });
-      const provider = selectProviderForMessages(messages);
-      const p = PROVIDERS[provider];
-      if (!KEYS[provider]) return sendJson(res, 400, { error: "No API key for " + p.label + ". Set " + p.envHint + " or add it to serve.config.json, then restart the server." });
-      console.log("POST /q  provider=" + provider + "  turns=" + messages.length);
+      const chain = providerChainForMessages(messages, normalizeProvider(payload && payload.provider));
+      const usable = chain.find((n) => KEYS[n]);
+      if (!usable) {
+        const need = PROVIDERS[chain[0]] || PROVIDERS.glm;
+        return sendJson(res, 400, { error: "No API key for " + need.label + ". Set " + need.envHint + " or add it to serve.config.json, then restart the server." });
+      }
+      console.log("POST /q  chain=[" + chain.join(",") + "]  image=" + messagesContainImage(messages) + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       try {
-        await streamChat(messages, res);
+        await streamWithFallback(payload, res);
       } catch (e) {
         console.log("stream error:", e && e.message);
         try { res.write("\n\n_(Fehler: " + ((e && e.message) || "stream failed") + ")_"); } catch (e2) {}
       }
       try { res.end(); } catch (e) {}
+    });
+    return;
+  }
+
+  // SQL sandbox: status probe + query + dump import against the local MySQL.
+  if (urlPath === "/sql/status") {
+    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
+    if (req.method === "HEAD") { res.writeHead(200); return res.end(); }
+    return mysqlStatus().then((s) => sendJson(res, 200, s)).catch((e) => sendJson(res, 200, { available: false, reason: (e && e.message) || "error" }));
+  }
+  if (urlPath === "/sql/filestatus") {
+    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
+    return fs.stat(SNAPSHOT_PATH, (err, st) => {
+      if (err || !st.isFile()) return sendJson(res, 200, { exists: false });
+      sendJson(res, 200, { exists: true, size: st.size, name: path.basename(SNAPSHOT_PATH), mtime: st.mtimeMs });
+    });
+  }
+  if (urlPath === "/sql/file") {
+    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
+    return fs.stat(SNAPSHOT_PATH, (err, st) => {
+      if (err || !st.isFile()) { res.writeHead(404); return res.end("no snapshot"); }
+      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": st.size, "Cache-Control": "no-store" });
+      if (req.method === "HEAD") return res.end();
+      fs.createReadStream(SNAPSHOT_PATH).on("error", () => { try { res.destroy(); } catch (e) {} }).pipe(res);
+    });
+  }
+  if (urlPath === "/sql/schema") {
+    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
+    if (req.method === "HEAD") { res.writeHead(200); return res.end(); }
+    return mysqlSchema().then((tables) => sendJson(res, 200, { engine: "mysql", database: MYSQL_CFG.database, tables }))
+      .catch((e) => sendJson(res, 200, { engine: "mysql", database: MYSQL_CFG.database, tables: [], error: (e && e.message) || "schema unavailable" }));
+  }
+  if (urlPath === "/sql/query") {
+    if (!allowMethods(req, res, ["POST"])) return;
+    readJsonBody(req, res, 4e6, async (payload) => {
+      const sql = payload && payload.sql;
+      if (!sql || typeof sql !== "string") return sendJson(res, 400, { error: "Missing sql" });
+      try { const out = await mysqlQuery(sql); sendJson(res, 200, out); }
+      catch (e) { console.log("SQL query error:", e && e.message); sendJson(res, (e && e.status) || 502, { error: (e && e.message) || "query failed" }); }
+    });
+    return;
+  }
+  if (urlPath === "/sql/import") {
+    if (!allowMethods(req, res, ["POST"])) return;
+    readJsonBody(req, res, 80e6, async (payload) => {
+      const sql = payload && payload.sql;
+      if (!sql || typeof sql !== "string") return sendJson(res, 400, { error: "Missing sql" });
+      console.log("POST /sql/import  bytes=" + sql.length);
+      try { const out = await mysqlImport(sql); console.log("  imported " + out.tables.length + " tables into " + out.database); sendJson(res, 200, out); }
+      catch (e) { console.log("SQL import error:", e && e.message); sendJson(res, (e && e.status) || 502, { error: (e && e.message) || "import failed" }); }
     });
     return;
   }
@@ -417,6 +657,12 @@ server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} }
 server.listen(PORT, () => {
   console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
   console.log(`serving ${ROOT}`);
-  console.log("LLM keys present: glm=" + !!KEYS.glm + " haiku=" + !!KEYS.haiku);
+  console.log("LLM keys present: glm=" + !!KEYS.glm + " sonnet/haiku=" + !!KEYS.sonnet);
+  mysqlStatus().then((s) => {
+    if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
+    else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");
+    try { const st = fs.statSync(SNAPSHOT_PATH); console.log("SQL snapshot: " + path.basename(SNAPSHOT_PATH) + " present (" + Math.round(st.size / 1024) + " KB) — app auto-loads it"); }
+    catch (e) { console.log("SQL snapshot: none yet — run `node mysql-to-sqlite.js --database <db>` to create " + path.relative(ROOT, SNAPSHOT_PATH)); }
+  }).catch(() => {});
   console.log("(Ctrl+C to stop)");
 });

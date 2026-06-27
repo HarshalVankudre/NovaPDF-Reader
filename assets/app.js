@@ -9,14 +9,15 @@
 
   const DATA_URL = "data/slides.json";
   const DEFAULT_PROVIDER = "glm";
-  const AI_PROVIDERS = ["glm"];
+  const AI_PROVIDERS = ["glm", "sonnet", "haiku"];
+  const VISION_SLIDES = 3; // top slides attached as images for vision grounding
   const PROVIDER_ALIASES = {
-    haiku: "glm",
-    claude: "glm",
+    claude: "sonnet",
+    opus: "sonnet",
     codex: "glm",
-    sonnet: "glm",
     grok: "glm",
     deepseek: "glm",
+    gpt: "glm",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -121,6 +122,7 @@
       selectProvider(localStorage.getItem("aiProvider") || DEFAULT_PROVIDER);
     } catch (e) { selectProvider(DEFAULT_PROVIDER); }
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
+    try { fastMode = localStorage.getItem("aiFast") === "1"; } catch (e) {}
 
     document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
 
@@ -184,7 +186,9 @@
   }
 
   const THUMB_W = 700; // render width (px) — displayed scaled, stays crisp
-  // Render a slide to a bitmap once and remember its text-item boxes for highlighting.
+  // Render a slide to a bitmap once (cached). Highlight geometry is computed
+  // separately by getWordBoxes, so the main viewer can highlight without
+  // re-rendering a thumbnail bitmap.
   function getPageRender(globalPage) {
     if (!pageRenderCache.has(globalPage)) {
       pageRenderCache.set(globalPage, (async () => {
@@ -198,28 +202,98 @@
         canvas.width = Math.floor(vp.width);
         canvas.height = Math.floor(vp.height);
         await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
-        let items = [];
-        try {
-          const tc = await page.getTextContent();
-          items = tc.items.map((it) => {
-            const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
-            const fontH = Math.hypot(tx[2], tx[3]) || 10;
-            return { str: it.str || "", x: tx[4], y: tx[5] - fontH, w: (it.width || 0) * scale, h: fontH * 1.14 };
-          });
-        } catch (e) {}
         const bitmap = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
-        return { bitmap, cssW: vp.width, cssH: vp.height, items };
+        return { bitmap, cssW: vp.width, cssH: vp.height };
       })());
     }
     return pageRenderCache.get(globalPage);
   }
 
   const fold = (w) => (typeof SlideSearchEngine.fold === "function" ? SlideSearchEngine.fold(w) : w.toLowerCase());
-  function itemHasHit(str, cq) {
-    if (!cq || !cq.hitSet || !cq.hitSet.size) return false;
-    const re = /[\p{L}\p{N}]+/gu; let m;
-    while ((m = re.exec(str)) !== null) if (cq.hitSet.has(fold(m[0]))) return true;
-    return false;
+
+  // Render a slide to a JPEG data payload for the vision model. Rendered fresh at
+  // a higher resolution than the thumbnail so diagrams/ER-models/SQL stay legible.
+  async function renderSlideForVision(globalPage, width) {
+    const L = pageToLecture[globalPage];
+    const doc = await getLectureDoc(L);
+    const page = await doc.getPage(globalPage - L.startPage + 1);
+    const base = page.getViewport({ scale: 1 });
+    const scale = (width || 1200) / base.width;
+    const vp = page.getViewport({ scale });
+    const c = document.createElement("canvas");
+    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+    await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
+    const url = c.toDataURL("image/jpeg", 0.82);
+    return { media_type: "image/jpeg", data: url.split(",")[1] };
+  }
+
+  // Per-word highlight geometry in NORMALIZED page coords (0..1), computed once
+  // per slide from the pdf.js text layer at scale 1. Because each box is a
+  // fraction of the page, the same data positions a highlight correctly at any
+  // zoom or thumbnail size when placed with CSS percentages — no drift. (This is
+  // why the old absolute-pixel overlay was removed; this approach replaces it.)
+  // Within a text run we split into words and map each word's offset onto the
+  // run's true rendered width via canvas measureText, so highlights hug the word.
+  const wordBoxCache = new Map();
+  function getWordBoxes(globalPage) {
+    if (!wordBoxCache.has(globalPage)) {
+      wordBoxCache.set(globalPage, (async () => {
+        const L = pageToLecture[globalPage];
+        const doc = await getLectureDoc(L);
+        const page = await doc.getPage(globalPage - L.startPage + 1);
+        const vp = page.getViewport({ scale: 1 });
+        const pageW = vp.width || 1, pageH = vp.height || 1;
+        const boxes = [];
+        const meas = document.createElement("canvas").getContext("2d");
+        const RE = /[\p{L}\p{N}]+/gu;
+        try {
+          const tc = await page.getTextContent();
+          for (const it of tc.items) {
+            const str = it.str || "";
+            if (!str.trim()) continue;
+            const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
+            const fontH = Math.hypot(tx[2], tx[3]) || 10;
+            const x0 = tx[4], yTop = tx[5] - fontH;
+            const runW = it.width || 0; // already in scale-1 page units
+            meas.font = fontH + "px sans-serif";
+            const full = meas.measureText(str).width || 1;
+            const k = runW > 0 ? runW / full : 0; // map our metrics onto the true run width
+            let m; RE.lastIndex = 0;
+            while ((m = RE.exec(str)) !== null) {
+              const pre = meas.measureText(str.slice(0, m.index)).width;
+              const wpx = meas.measureText(m[0]).width;
+              boxes.push({
+                f: fold(m[0]),
+                x: (x0 + pre * k) / pageW,
+                y: yTop / pageH,
+                w: (wpx * k) / pageW,
+                h: (fontH * 1.18) / pageH,
+              });
+            }
+          }
+        } catch (e) {}
+        return { boxes };
+      })());
+    }
+    return wordBoxCache.get(globalPage);
+  }
+
+  // Paint yellow highlight boxes (CSS-% divs) for every word whose folded form is
+  // in the compiled query. Scale-independent: the layer only needs to be
+  // position:absolute; inset:0 over a box the size of the rendered slide.
+  function placeHighlights(layerEl, wb, cq) {
+    if (!layerEl) return;
+    layerEl.innerHTML = "";
+    if (!wb || !cq || !cq.hitSet || !cq.hitSet.size) return;
+    const frag = document.createDocumentFragment();
+    for (const b of wb.boxes) {
+      if (b.w <= 0 || !cq.hitSet.has(b.f)) continue;
+      const d = document.createElement("div");
+      d.className = "hl-box";
+      d.style.cssText = "left:" + (b.x * 100) + "%;top:" + (b.y * 100) + "%;width:" + (b.w * 100) + "%;height:" + (b.h * 100) + "%";
+      frag.appendChild(d);
+    }
+    layerEl.appendChild(frag);
   }
 
   async function renderCardThumb(card, globalPage, cq) {
@@ -232,8 +306,11 @@
     if (!card.isConnected) return;
     canvas.width = r.bitmap.width; canvas.height = r.bitmap.height;
     canvas.getContext("2d").drawImage(r.bitmap, 0, 0);
-    if (hl) hl.innerHTML = "";
     card.classList.add("thumb-ready");
+    if (hl) {
+      if (cq) { try { const wb = await getWordBoxes(globalPage); if (card.isConnected) placeHighlights(hl, wb, cq); } catch (e) {} }
+      else hl.innerHTML = "";
+    }
   }
 
   async function renderMain(num) {
@@ -295,19 +372,23 @@
     loadingEl.hidden = true; pageWrap.hidden = false;
     zoomLevel.textContent = Math.round(scale * 100) + "%";
     curMainPage = num; curMainCW = cw; curMainCH = ch;
-    drawMainHighlights(num, cw, ch);
+    drawMainHighlights(num);
   }
 
-  // In-page match overlay was removed: the pdf.js text-item boxes only
-  // approximate glyph positions and drifted badly at zoom (wide misplaced
-  // bands). The viewer now reads as a plain PDF; search still finds + jumps
-  // to the right slide. Keep the layer cleared so nothing stale lingers.
-  function drawMainHighlights() {
-    if (hlLayer) hlLayer.innerHTML = "";
+  // Yellow match overlay on the main viewer. Uses the normalized word boxes
+  // placed with CSS %, so it tracks the canvas exactly at any zoom. (The old
+  // pixel-based overlay drifted into wide misplaced bands and was removed; this
+  // normalized version does not drift, so highlighting is back on the main view.)
+  async function drawMainHighlights(num) {
+    if (!hlLayer) return;
+    hlLayer.innerHTML = "";
+    if (!compiled || typeof pdfjsLib === "undefined") return;
+    try {
+      const wb = await getWordBoxes(num);
+      if (curMainPage === num && compiled) placeHighlights(hlLayer, wb, compiled);
+    } catch (e) {}
   }
-  function redrawMainHighlights() {
-    if (hlLayer) hlLayer.innerHTML = "";
-  }
+  function redrawMainHighlights() { drawMainHighlights(curMainPage || pageNum); }
 
   function goToPage(num) {
     num = Math.max(1, Math.min(pdfTotal, num | 0));
@@ -342,7 +423,7 @@
     if (!query) { compiled = null; renderPageList(allPages, null); redrawMainHighlights(); return; }
     const res = engine.search(query, { limit: 48 });
     compiled = res.compiled;
-    renderPageList(res.results.map((r) => r.page), res.compiled);
+    renderPageList(res.results, res.compiled);
     redrawMainHighlights();
   }
   function syncUrl(query) {
@@ -356,13 +437,16 @@
 
   // ---- Adobe-style page thumbnail panel -----------------------------------
   let allPages = []; // [1..totalPages], built in init
-  function renderPageList(pages, cq) {
+  // Two modes: a plain page navigator (entries = page numbers, cq null) and rich
+  // search results (entries = engine result objects with snippet/score, cq set).
+  function renderPageList(entries, cq) {
     examplesEl.hidden = true;
     if (thumbObserver) { thumbObserver.disconnect(); thumbObserver = null; }
-    if (!pages.length) { resultsEl.innerHTML = stateMsg("🔍", "Keine Treffer", "Andere Begriffe versuchen."); return; }
+    if (!entries.length) { resultsEl.innerHTML = stateMsg("🔍", "Keine Treffer", "Andere Begriffe versuchen."); return; }
+    const rich = !!cq;
     if (typeof pdfjsLib !== "undefined" && "IntersectionObserver" in window) {
-      thumbObserver = new IntersectionObserver((entries, obs) => {
-        for (const e of entries) if (e.isIntersecting) {
+      thumbObserver = new IntersectionObserver((obsEntries, obs) => {
+        for (const e of obsEntries) if (e.isIntersecting) {
           obs.unobserve(e.target);
           renderCardThumb(e.target, +e.target.dataset.page, cq);
         }
@@ -370,11 +454,25 @@
     }
     const frag = document.createDocumentFragment();
     const cards = [];
-    pages.forEach((p) => {
+    entries.forEach((entry) => {
+      const p = typeof entry === "number" ? entry : entry.page;
       const card = document.createElement("button");
-      card.className = "pg-thumb";
+      card.className = rich ? "pg-thumb result" : "pg-thumb";
       card.dataset.page = p;
-      card.innerHTML = '<div class="pg-img"><canvas class="rc-canvas"></canvas><div class="rc-hl"></div></div><div class="pg-num">' + p + "</div>";
+      let html = '<div class="pg-img"><canvas class="rc-canvas"></canvas><div class="rc-hl"></div></div>';
+      if (rich) {
+        const L = pageToLecture[p];
+        const pct = Math.max(6, Math.round((entry.norm || 0) * 100));
+        const snip = engine.highlightHTML(entry.snippet || "", cq);
+        html += '<div class="rc-meta"><div class="rc-top">' +
+                '<span class="rc-page">Folie ' + p + '</span>' +
+                '<span class="rc-lecture">' + esc(L ? lectureShort(L) : "") + '</span>' +
+                '<span class="rc-bar"><i style="width:' + pct + '%"></i></span></div>' +
+                '<div class="rc-snippet">' + snip + '</div></div>';
+      } else {
+        html += '<div class="pg-num">' + p + '</div>';
+      }
+      card.innerHTML = html;
       card.addEventListener("click", () => { goToPage(p); });
       frag.appendChild(card);
       cards.push(card);
@@ -412,6 +510,7 @@
   // ===================== hidden tutor chat (streaming markdown notes) ======
   let aiThread = [];        // [{role:'user'|'assistant', content, q}]
   let aiStreaming = false;
+  let fastMode = false;     // :fast → text-only (no slide images) for a quick GLM answer
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
 
@@ -476,12 +575,15 @@
     let assistantTurn = null;
 
     try {
-      const provider = isImageAsk ? "haiku" : "glm";
+      // Provider hint for the server (it still enforces modality: any image content
+      // is routed to a vision model regardless). Text-only honors the selected model.
+      const provider = isImageAsk ? "sonnet" : (aiProviderSel.value || DEFAULT_PROVIDER);
 
       // BM25 slide text is for TEXT questions only.
       // A pasted screenshot is self-contained, so we send just the image — no slides.
       let citationSlides = [];
       let slidesText = "";
+      let visionImages = [];     // rendered images of the top slides (vision grounding)
       if (q && !isImageAsk) {
         const res = engine.search(q, { limit: 12 });
         const pickedSlides = res.results.slice(0, 12);
@@ -490,6 +592,13 @@
           "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
           (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
         ).join("\n\n");
+        // Attach the top slides as IMAGES so the model can actually read diagrams /
+        // ER-models / tables the extracted text misses. :fast turns this off.
+        if (!fastMode && typeof pdfjsLib !== "undefined") {
+          const topPages = pickedSlides.slice(0, VISION_SLIDES).map((r) => r.page);
+          visionImages = (await Promise.all(topPages.map((pg) =>
+            renderSlideForVision(pg, 1200).catch(() => null)))).filter(Boolean);
+        }
       }
 
       // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
@@ -500,12 +609,17 @@
           "STRUKTURIERT: gliedere mit klaren Überschriften/Abschnitten, gib je Schritt eine kurze Begründung, " +
           "und schließe mit einem knappen Ergebnis. Nutze Listen, nummerierte Schritte oder eine Tabelle, wo es passt.";
       } else {
-        textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "");
+        let schema = "";
+        try { if (window.SqlSandbox && SqlSandbox.schemaText) schema = await SqlSandbox.schemaText(); } catch (e) {}
+        textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
+          (schema ? "\n\n--- Importiertes Datenbank-Schema (nutze GENAU diese Tabellen-/Spaltennamen für SQL) ---\n" + schema : "") +
+          (visionImages.length ? "\n\n(Die wichtigsten Folien sind zusätzlich als Bilder beigefügt — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
       }
 
-      // neutral content blocks: text, then pasted images
+      // neutral content blocks: text, then images (pasted screenshots, or rendered top slides)
       const blocks = [{ type: "text", text: textPart }];
-      for (const im of imgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+      const attachImgs = isImageAsk ? imgs : visionImages;
+      for (const im of attachImgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
 
       aiThread = [];            // no history — each question is standalone
       aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
@@ -524,7 +638,7 @@
         pending = false;
         if (!streamBodyEl) return;
         streamBodyEl.innerHTML = renderMarkdown(acc) + '<span class="nt-caret"></span>';
-        wireSlideRefs(streamBodyEl);
+        enhanceAnswer(streamBodyEl);
         const doc = aiPanel.querySelector("#ntDoc");
         if (doc) doc.scrollTop = doc.scrollHeight;
       };
@@ -552,7 +666,7 @@
           assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides);
         }
       } catch (e) {}
-      if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); wireSlideRefs(streamBodyEl); }
+      if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); enhanceAnswer(streamBodyEl); }
     } catch (e) {
       if (assistantTurn) {
         assistantTurn.content = "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
@@ -595,7 +709,7 @@
         const a = document.createElement("div");
         a.className = "nt-a";
         a.innerHTML = turn.content ? renderMarkdown(turn.content) : '<span class="nt-caret"></span>';
-        wireSlideRefs(a);
+        enhanceAnswer(a);
         doc.appendChild(a);
         streamBodyEl = a;
       }
@@ -608,7 +722,7 @@
     if (!src) return "";
     const SLIDE_REF_RE = /\b(Folien?|Slides?|S\.?)\s*(\d+(?:\s*(?:[,;/&]|und|and)\s*(?:(?:Folien?|Slides?|S\.?)\s*)?\d+)*)/g;
     const lines = String(src).replace(/\r\n?/g, "\n").split("\n");
-    let html = "", listType = null, inCode = false, codeBuf = [], para = [];
+    let html = "", listType = null, inCode = false, codeBuf = [], para = [], codeLang = "";
     function inline(t) {
       t = esc(t);
       t = t.replace(SLIDE_REF_RE, function (m, kw, nums) {
@@ -625,8 +739,8 @@
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
       if (/^```/.test(line)) {
-        if (!inCode) { flushPara(); closeList(); inCode = true; codeBuf = []; }
-        else { html += '<pre class="nt-code"><code>' + esc(codeBuf.join("\n")) + "</code></pre>"; inCode = false; }
+        if (!inCode) { flushPara(); closeList(); inCode = true; codeBuf = []; codeLang = (line.match(/^```\s*([A-Za-z0-9_+-]+)/) || [])[1] || ""; }
+        else { const cls = "nt-code" + (codeLang ? " lang-" + esc(codeLang.toLowerCase()) : ""); html += '<pre class="' + cls + '"><code>' + esc(codeBuf.join("\n")) + "</code></pre>"; inCode = false; codeLang = ""; }
         continue;
       }
       if (inCode) { codeBuf.push(line); continue; }
@@ -662,6 +776,26 @@
       a.addEventListener("click", (e) => { e.preventDefault(); goToPage(+a.dataset.page); });
     });
   }
+  // Add a "Run" button under each SQL code block the tutor writes, executing it
+  // in the sandbox against the imported exam DB and showing the result inline.
+  function wireSqlRuns(container) {
+    container.querySelectorAll("pre.lang-sql, pre.lang-mysql").forEach((pre) => {
+      if (pre.dataset.wired) return;
+      const code = pre.querySelector("code");
+      if (!code) return;
+      pre.dataset.wired = "1";
+      const bar = document.createElement("div");
+      bar.className = "nt-runbar";
+      const btn = document.createElement("button");
+      btn.className = "nt-run";
+      btn.textContent = "▷ Ausführen";
+      btn.title = "SQL gegen die importierte Datenbank ausführen";
+      btn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.runInline(bar, code.textContent, btn); });
+      bar.appendChild(btn);
+      pre.parentNode.insertBefore(bar, pre.nextSibling);
+    });
+  }
+  function enhanceAnswer(el) { if (!el) return; wireSlideRefs(el); wireSqlRuns(el); }
 
   // ---- stealth: typed commands in the search box (start with ":") ----------
   function handleSecretCommand(v) {
@@ -670,11 +804,19 @@
     if (raw === "ai") { toggleAiBar(); }
     else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
     else if (raw === "close") { closeChat(); return; }
+    else if (raw === "sql" || raw === "db" || raw === "query") { if (window.SqlSandbox) window.SqlSandbox.toggle(); qInput.value = ""; onInput(); return; }
+    else if (raw === "fast" || raw === "quick") { setFastMode(true); }
+    else if (raw === "vision" || raw === "slides" || raw === "bilder") { setFastMode(false); }
     else if (AI_PROVIDERS.indexOf(cmd) !== -1) {
       selectProvider(cmd);
       showAiToast(aiProviderSel.options[aiProviderSel.selectedIndex].text);
     } else { showAiToast(":" + raw + " ?"); }
     qInput.value = ""; onInput();
+  }
+  function setFastMode(on) {
+    fastMode = !!on;
+    try { localStorage.setItem("aiFast", fastMode ? "1" : "0"); } catch (e) {}
+    showAiToast(fastMode ? "schnell · nur Text (GLM)" : "Folienbilder an (Vision)");
   }
   function toggleAiBar() {
     aiBar.hidden = !aiBar.hidden;
@@ -736,6 +878,8 @@
     zoomInBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) * 1.2; renderMain(pageNum); });
     zoomOutBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) / 1.2; renderMain(pageNum); });
     fitBtn.addEventListener("click", () => { manualZoom = false; renderMain(pageNum); });
+    const sqlBtn = $("sqlBtn");
+    if (sqlBtn) sqlBtn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.toggle(); });
     let resizeTimer = null;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);

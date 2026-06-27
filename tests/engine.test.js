@@ -27,7 +27,9 @@ const CASES = [
   // PK+FK is covered in VL3 (modeling), VL4 (DDL syntax) and VL7 (integrity)
   { q: "Primärschlüssel und Fremdschlüssel", expect: [[88, 120], [160, 180], [280, 290]] },
   { q: "GROUP BY und HAVING", expect: [[207, 260]] },
-  { q: "Transaktionen und Sperren", expect: [[275, 317]] },
+  // p.160 is the TCL slide (COMMIT/ROLLBACK/SAVEPOINT/LOCK TABLE/SET TRANSACTION) —
+  // a valid overview hit via the Sperre↔Lock bridge; the deep VL7 slides rank just behind.
+  { q: "Transaktionen und Sperren", expect: [[154, 185], [275, 317]] },
   { q: "Entity Relationship Modell", expect: [[39, 83]] },
   // p.96 (cardinality + relationship types) is the correct best hit, in VL3
   { q: "Kardinalität einer Beziehung", expect: [[39, 120]] },
@@ -42,6 +44,29 @@ const CASES = [
   { q: "Wie verhindere ich doppelte Werte in einer Spalte?", expect: [[103, 118], [181, 181], [279, 290]], top: 3 },
   { q: "Spalte darf nicht leer sein", expect: [[111, 119], [169, 195], [279, 290]], top: 3 },
   { q: "Durchschnitt pro Produktkategorie berechnen", expect: [[228, 271]], top: 3 },
+  // --- exam-topic coverage, phrase ordering, and SQL-keyword search (added) ---
+  { q: "INNER JOIN", expect: [[247, 260]] },
+  { q: "LEFT OUTER JOIN", expect: [[247, 260]] },
+  { q: "kartesisches Produkt", expect: [[238, 260]] },
+  { q: "ORDER BY absteigend", expect: [[207, 274]] },
+  { q: "SELECT DISTINCT", expect: [[207, 274]] },
+  { q: "Unterabfrage", expect: [[260, 274]] },
+  { q: "WHERE BETWEEN", expect: [[207, 274]] },          // SQL keyword search now works
+  { q: "Aggregatfunktion", expect: [[207, 274]] },
+  { q: "funktionale Abhängigkeit", expect: [[123, 153], [241, 241]], top: 3 },
+  { q: "erste Normalform", expect: [[123, 151]] },
+  { q: "zweite Normalform", expect: [[123, 151]] },
+  { q: "Boyce-Codd-Normalform", expect: [[123, 151]], top: 3 }, // p.22 = the Codd quote
+  { q: "referentielle Integrität", expect: [[275, 317]] },
+  { q: "ON DELETE CASCADE", expect: [[288, 296]] },
+  { q: "AUTO_INCREMENT", expect: [[154, 185]] },
+  { q: "CREATE TABLE", expect: [[154, 185]] },
+  { q: "Isolationsebene", expect: [[304, 317]] },
+  { q: "Deadlock Verklemmung", expect: [[298, 317]] },
+  { q: "Lost Update", expect: [[304, 313]] },
+  { q: "Dirty Read", expect: [[304, 313]] },
+  { q: "schwache Entität", expect: [[39, 121]] },
+  { q: "Generalisierung Spezialisierung", expect: [[39, 121]] },
 ];
 
 let pass = 0;

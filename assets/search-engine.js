@@ -543,7 +543,7 @@
       if (!Array.isArray(slides)) return answerText;
       const PAGE_REF = "(?:Folien?|Slides?|S\\.?)";
       const CITE = new RegExp(
-        "\\(?\\s*" + PAGE_REF + "\\s*(\\d+(?:\\s*(?:[,;/&]|und|and)\\s*(?:" + PAGE_REF + "\\s*)?\\d+)*)\\s*\\)?",
+        "\\(?\\s*" + PAGE_REF + "\\s*(\\d+(?:\\s*(?:[,;/&\\u2013-]|und|and|bis|to)\\s*(?:" + PAGE_REF + "\\s*)?\\d+)*)\\s*\\)?",
         "gi"
       );
       let out = "";

@@ -137,10 +137,12 @@ const SYSTEM_PROMPT =
   'You are a precise study assistant for the German university database course ' +
   '"DSCB140 - Datenbanken & Datenkunde". You receive a student QUESTION and several candidate ' +
   'lecture SLIDES (each with a global page number, its lecture, a title, and extracted text). ' +
-  'Identify which slide(s) best answer the question, then write a short, correct answer GROUNDED ' +
+  'Identify which slide(s) best answer the question, then write the answer GROUNDED ' +
   'ONLY in those slides - never invent facts not present in them. Answer in the SAME language as ' +
-  'the question, concisely (2-6 sentences). If none of the slides answer it, say so briefly and ' +
-  'use an empty slides list. Return ONLY a JSON object (no markdown, no code fences) of the exact ' +
+  'the question. Give ONLY the answer - the bare value/term/correct option, no preamble and no ' +
+  'restating; at most one short sentence unless the task is inherently multi-part. If none of the ' +
+  'slides answer it, say so in a few words and use an empty slides list. Return ONLY a JSON object ' +
+  '(no markdown, no code fences) of the exact ' +
   'form: {"answer": "...", "slides": [<global page numbers you actually used, most relevant first>]}';
 
 function buildUserPrompt(question, candidates) {
@@ -202,8 +204,8 @@ async function askOpenAICompatible(p, key, system, user) {
 }
 
 async function askLLM(question, candidates) {
-  const p = PROVIDERS.glm;
-  const key = KEYS.glm;
+  const p = PROVIDERS.opus;
+  const key = KEYS.opus;
   if (!key) {
     const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
@@ -217,25 +219,21 @@ async function askLLM(question, candidates) {
 
 // ---- streaming tutor chat ----
 const CHAT_SYSTEM =
-  'You are an expert tutor for the German university database course "DSCB140 - Datenbanken & Datenkunde". ' +
-  'Answer using ONLY the provided slide excerpts (some may also be given as images), in the SAME language ' +
-  'as the question. You may also receive a screenshot the student pasted (e.g. an exam question or a diagram) - ' +
-  'read it and answer it directly. ' +
-  'Match the answer length to what the question genuinely needs - no more, no less. ' +
-  'For a simple, factual, or multiple-choice question: reply with ONLY the answer - a single short sentence ' +
-  '(for multiple choice, just the correct option), and no explanation or justification unless the student ' +
-  'asks for it (e.g. "warum", "erklär", "begründe", "wieso", "erläutere"). For a question that genuinely ' +
-  'needs more - explain in depth, compare, derive step by step, write non-trivial SQL, or list several ' +
-  'things - give a COMPLETE answer using short bullets, numbered steps, or a fenced ```sql block as ' +
-  'appropriate, and never cut it off mid-thought. In all cases stay tight: no preamble, no restating the ' +
-  'question, no summary or sign-off, no padding. Default to concise; expand only when the content truly ' +
-  'requires it. Use **bold** for key terms. Cite the slide you used inline as "(Folie N)" with the global ' +
-  'page number from the context. ' +
-  'If the slides do not contain the answer, say so in one short sentence. NEVER mention being an AI, a model, ' +
-  'or that this text is generated - write as if it were the course\'s own notes. No greetings, no "as an AI".';
+  'You are the course notes for the German database course "DSCB140 - Datenbanken & Datenkunde". ' +
+  'Use ONLY the provided slide excerpts/images (and any pasted screenshot or attached file). Answer in the question\'s language. ' +
+  'Think it through carefully, but OUTPUT ONLY the precise answer to exactly what was asked - nothing else. ' +
+  'NO explanation, NO reasoning shown, NO "Begründung", NO headings, NO bold labels, NO "---" separators, ' +
+  'NO restating the question, NO recap, NO preamble ("Die Antwort ist", "Laut Folie"). ' +
+  'Be as short as possible - readable in 2 seconds. ' +
+  'Fill-in-the-blank (Lückentext): output ONLY the missing words, one per line, numbered to match the blanks. ' +
+  'Multiple-choice: output ONLY the correct option(s). Single fact/definition: one word or one short phrase. ' +
+  'The ONLY exception: if the question literally asks you to explain (warum, erkläre, begründe, Herleitung/Schritte), ' +
+  'give the minimum as terse bullets/steps; for SQL, output just the ```sql block (complete, never cut off mid-thought). ' +
+  'End with the source as "(Folie N)" (global page number) and nothing after it. ' +
+  'If the slides lack the answer, say so in one short line. Never mention being an AI or that this is generated.';
 
-// Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to each
-// provider's wire format. Plain-string content is passed through untouched.
+// Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to
+// each provider's wire format. Plain-string content is passed through untouched.
 function toClaudeMessages(messages) {
   return messages.map((m) => {
     if (typeof m.content === "string" || !Array.isArray(m.content)) return m;
@@ -255,7 +253,12 @@ function toOpenAIMessages(messages) {
   });
 }
 
-const FIRST_TOKEN_MS = 22000; // abort an attempt that produces no token in time -> fall back
+// Adaptive thinking is on, so the model decides how much to reason internally
+// before any visible text — the first TEXT token can lag while it thinks, so give
+// that phase room. Depth is set by REASONING_EFFORT, not a token budget
+// (budget_tokens is removed on Opus 4.8; adaptive thinking + effort replaces it).
+const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
+const REASONING_EFFORT = "high";    // adaptive-thinking depth: low | medium | high | xhigh | max
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function streamAnthropic(p, key, messages, write, signal) {
@@ -264,9 +267,17 @@ async function streamAnthropic(p, key, messages, write, signal) {
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
   const stream = client.messages.stream(
-    { model: p.model, max_tokens: 2048, system: CHAT_SYSTEM, messages: toClaudeMessages(messages) },
-    { signal, timeout: 120000 }
+    {
+      model: p.model,
+      max_tokens: 16384,
+      thinking: { type: "adaptive" },                 // Opus 4.8 adaptive thinking (replaces budget_tokens)
+      output_config: { effort: REASONING_EFFORT },    // how deeply it reasons before answering
+      system: CHAT_SYSTEM,
+      messages: toClaudeMessages(messages),
+    },
+    { signal, timeout: 300000 }
   );
+  // only the visible answer is streamed; thinking deltas are never written out
   stream.on("text", (t) => { try { write(t); } catch (e) {} });
   const fm = await stream.finalMessage();
   if (fm && fm.stop_reason === "max_tokens") { try { write("\n\n… (gekürzt)"); } catch (e) {} }
@@ -281,7 +292,7 @@ async function streamOpenAICompatible(p, key, messages, write, signal) {
         headers: { Authorization: "Bearer " + key, "Content-Type": "application/json" },
         body: JSON.stringify(buildOpenAIRequestBody(p, {
           messages: [{ role: "system", content: CHAT_SYSTEM }].concat(toOpenAIMessages(messages)),
-          max_tokens: 2048, temperature: 0.3, stream: true,
+          max_tokens: 4096, temperature: 0.3, stream: true,
         })),
         signal,
       });
@@ -522,7 +533,7 @@ const server = http.createServer((req, res) => {
     readJsonBody(req, res, 4e6, async (payload) => {
       const { question, candidates } = payload || {};
       if (!question || !Array.isArray(candidates)) return sendJson(res, 400, { error: "Missing question or candidates" });
-      console.log("POST /llm  provider=glm  candidates=" + candidates.length);
+      console.log("POST /llm  provider=opus  candidates=" + candidates.length);
       try {
         const result = await askLLM(String(question), candidates);
         sendJson(res, 200, result);
@@ -543,7 +554,7 @@ const server = http.createServer((req, res) => {
       const chain = providerChainForMessages(messages, normalizeProvider(payload && payload.provider));
       const usable = chain.find((n) => KEYS[n]);
       if (!usable) {
-        const need = PROVIDERS[chain[0]] || PROVIDERS.glm;
+        const need = PROVIDERS[chain[0]] || PROVIDERS.opus;
         return sendJson(res, 400, { error: "No API key for " + need.label + ". Set " + need.envHint + " or add it to serve.config.json, then restart the server." });
       }
       console.log("POST /q  chain=[" + chain.join(",") + "]  image=" + messagesContainImage(messages) + "  turns=" + messages.length);
@@ -657,7 +668,7 @@ server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} }
 server.listen(PORT, () => {
   console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
   console.log(`serving ${ROOT}`);
-  console.log("LLM keys present: glm=" + !!KEYS.glm + " sonnet/haiku=" + !!KEYS.sonnet);
+  console.log("LLM key present: opus=" + !!KEYS.opus);
   mysqlStatus().then((s) => {
     if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
     else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");

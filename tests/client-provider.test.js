@@ -6,27 +6,17 @@ const ROOT = path.join(__dirname, "..");
 const html = fs.readFileSync(path.join(ROOT, "index.html"), "utf8");
 const app = fs.readFileSync(path.join(ROOT, "assets", "app.js"), "utf8");
 
-const select = html.match(/<select id="aiProvider"[\s\S]*?<\/select>/);
-assert.ok(select, "provider selector should exist");
-const options = select[0].match(/<option\b[^>]*>/g) || [];
-assert.strictEqual(options.length, 3, "provider selector should expose GLM + Sonnet + Haiku");
-assert.match(select[0], /<option value="glm">GLM 5\.2<\/option>/);
-assert.match(select[0], /<option value="sonnet">Claude Sonnet 4\.6<\/option>/);
-assert.match(select[0], /<option value="haiku">Haiku 4\.5<\/option>/);
-
-assert.match(app, /const DEFAULT_PROVIDER = "glm";/);
-assert.match(app, /const AI_PROVIDERS = \["glm", "sonnet", "haiku"\];/);
-// image asks hint the vision model; text asks honor the selected model (server still enforces modality)
-assert.match(app, /const provider = isImageAsk \? "sonnet" : \(aiProviderSel\.value \|\| DEFAULT_PROVIDER\);/);
+// Single hardcoded model: no provider dropdown, no aliases, no switching commands.
+assert.doesNotMatch(html, /id="aiProvider"/, "the provider selector should be gone");
+assert.match(app, /const AI_PROVIDER = "opus";/, "Opus is the only model");
+assert.doesNotMatch(app, /PROVIDER_ALIASES/, "provider aliases should be removed");
+assert.doesNotMatch(app, /aiProviderSel/, "the provider selector wiring should be removed");
+// every ask sends the one model
+assert.match(app, /const provider = AI_PROVIDER;/);
 // vision grounding: typed questions attach rendered top-slide images unless :fast is on
 assert.match(app, /const VISION_SLIDES = 3;/);
 assert.match(app, /renderSlideForVision\(/);
 assert.match(app, /let fastMode = false;/);
-
-// aliased command names still resolve to a real provider
-for (const [alias, target] of [["claude", "sonnet"], ["opus", "sonnet"], ["codex", "glm"], ["grok", "glm"], ["deepseek", "glm"], ["gpt", "glm"]]) {
-  assert.match(app, new RegExp(alias + ': "' + target + '"'), alias + " should map to " + target);
-}
 
 const slideRefLiteral = app.match(/const SLIDE_REF_RE = (\/[^\n]+\/g);/);
 assert.ok(slideRefLiteral, "chat renderer should centralize slide-reference parsing");

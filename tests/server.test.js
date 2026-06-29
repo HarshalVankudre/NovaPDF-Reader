@@ -101,12 +101,12 @@ async function request(pathname, init) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        provider: "glm",
+        provider: "opus",
         messages: [{ role: "user", content: [{ type: "text", text: "ACID?" }] }],
       }),
     });
     assert.strictEqual(textRoute.status, 400, "text requests should validate a usable key before streaming");
-    assert.match((await textRoute.json()).error || "", /GLM 5\.2.*OPENROUTER_API_KEY/i);
+    assert.match((await textRoute.json()).error || "", /Claude Opus 4\.8.*ANTHROPIC_API_KEY/i);
 
     const imageRoute = await request("/q", {
       method: "POST",
@@ -115,8 +115,8 @@ async function request(pathname, init) {
         messages: [{ role: "user", content: [{ type: "image", media_type: "image/png", data: "abc" }] }],
       }),
     });
-    assert.strictEqual(imageRoute.status, 400, "image requests should validate the vision key before streaming");
-    assert.match((await imageRoute.json()).error || "", /Sonnet|ANTHROPIC_API_KEY/i);
+    assert.strictEqual(imageRoute.status, 400, "image requests should validate the Opus key before streaming");
+    assert.match((await imageRoute.json()).error || "", /Claude Opus 4\.8.*ANTHROPIC_API_KEY/i);
 
     console.log("server regression checks passed");
   } finally {

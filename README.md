@@ -41,32 +41,30 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 |---|---|
 | **`/`** | Reveal the hidden search sidebar (focus it). Brand stays hidden. |
 | **Ctrl + Enter** (in search) | Ask the tutor (streams into the "Notizen" pane) |
+| **paste a screenshot / `.sql` file** | Attach it to the next question — a screenshot becomes the question; a copied `.sql`/text file is attached as context the tutor reads (Enter then sends) |
 | **Esc** | Step back: close notes → clear query → hide search → plain viewer |
 | **← / →** | Previous / next page (works in plain-viewer mode too) |
 | type `:new` ↵ | Start a fresh conversation (clears the thread) |
-| type `:glm` ↵ | Select the text model (`:haiku`, `:claude`, `:codex`, `:sonnet`, `:grok`, and `:deepseek` remain compatibility aliases) |
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
-Text questions use OpenRouter `z-ai/glm-5.2` with throughput-first provider
-routing. Pasted screenshots automatically use Anthropic Haiku 4.5. The proxy
-endpoints are `/q` (streaming chat) and `/llm` (single-shot, legacy) — neutral
-names, keys server-side only.
+Every question — text and pasted screenshots alike — uses Anthropic
+**Claude Opus 4.8** (`claude-opus-4-8`); it's multimodal with high-res vision, so it reads
+screenshots and slide images directly. It's the only model — there's no picker
+and no switching command. The proxy endpoints are `/q` (streaming chat) and
+`/llm` (single-shot, legacy) — neutral names, keys server-side only.
 
-API keys live **only in the Node server** (never in the browser). Set the
-OpenRouter key for text questions and, if screenshot questions are needed, the
-Anthropic key. Restart the server after changing either:
+The API key lives **only in the Node server** (never in the browser). Set the
+Anthropic key and restart the server:
 
 ```powershell
 # Recommended — environment variable (never written to disk):
-setx OPENROUTER_API_KEY "sk-or-..."
-setx ANTHROPIC_API_KEY "sk-ant-..."      # optional: pasted screenshots
+setx ANTHROPIC_API_KEY "sk-ant-..."
 # reopen the terminal so the variable takes effect, then: node serve.js
 ```
 
-The server also loads `.env` and `.env.txt` from the project directory. The
-canonical key name is `OPENROUTER_API_KEY`; `OPEN_ROUTER_API_KEY` remains
-accepted for compatibility. Alternatively, copy `serve.config.example.json` to
-`serve.config.json` (gitignored). Model IDs are configurable under `models`.
+The server also loads `.env` and `.env.txt` from the project directory.
+Alternatively, copy `serve.config.example.json` to `serve.config.json`
+(gitignored). The model ID is configurable under `models.opus`.
 
 ## How it works
 

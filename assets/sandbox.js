@@ -242,6 +242,7 @@
       '<button class="sbx-x" title="Schließen (Esc)" aria-label="Schließen">&times;</button></div>' +
       '<div class="sbx-tools">' +
       '<button class="sbx-btn sbx-run">Ausführen ▷</button>' +
+      '<button class="sbx-btn sbx-ghost sbx-copy" title="SQL in die Zwischenablage kopieren">Kopieren ⧉</button>' +
       '<button class="sbx-btn sbx-ghost sbx-snap" hidden>Exam-DB laden</button>' +
       '<button class="sbx-btn sbx-ghost sbx-import">Als DB importieren</button>' +
       '<label class="sbx-btn sbx-ghost sbx-file">Datei…<input type="file" multiple accept=".sqlite,.sqlite3,.db,.sql,.csv,.txt" hidden></label>' +
@@ -257,6 +258,7 @@
     panel.querySelector(".sbx-x").addEventListener("click", close);
     engineEl.addEventListener("click", () => { toggleEngine().catch(() => {}); });
     panel.querySelector(".sbx-run").addEventListener("click", runFromEditor);
+    panel.querySelector(".sbx-copy").addEventListener("click", copyEditor);
     panel.querySelector(".sbx-import").addEventListener("click", importFromEditor);
     panel.querySelector(".sbx-snap").addEventListener("click", () => doImport(loadSnapshot));
     panel.querySelector(".sbx-file input").addEventListener("change", (e) => { doImport(() => importFiles(e.target.files)); e.target.value = ""; });
@@ -297,6 +299,19 @@
     const text = editorEl.value.trim();
     if (!text) { showResult(errHtml("Editor ist leer — Dump einfügen oder Datei ziehen.")); return; }
     doImport(() => importParsed([{ name: "einfügen.sql", text }]));
+  }
+  // copy the editor's SQL to the clipboard (graceful fallback); flashes "✓ Kopiert"
+  function copyEditor() {
+    const text = editorEl ? editorEl.value : "";
+    if (!text.trim()) return;
+    const btn = panel && panel.querySelector(".sbx-copy");
+    const restore = btn ? btn.textContent : "";
+    const ok = () => { if (btn) { btn.textContent = "✓ Kopiert"; setTimeout(() => { btn.textContent = restore; }, 1200); } };
+    const fallback = () => { try { editorEl.focus(); editorEl.select(); document.execCommand("copy"); ok(); } catch (e) {} };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(String(text)).then(ok, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
   }
   async function runFromEditor() {
     const sql = editorEl.value.trim();

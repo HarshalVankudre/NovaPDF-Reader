@@ -143,6 +143,9 @@ vcase("no citations unchanged", "SELECT * FROM kunde;", "SELECT * FROM kunde;");
 // 6. unparseable ref -> untouched
 vcase("unparseable untouched", "Siehe Folie (unbekannt)", "Siehe Folie (unbekannt)");
 
+// 6b. slide RANGE fully unsupported -> whole span dropped (no dangling "-N)" fragment)
+vcase("range citation fully stripped", "Überführung ins relationale Modell (Folie 99998-99999)", "Überführung ins relationale Modell");
+
 // 7. verifier never throws on weird input
 let threw = false;
 try { SlideSearchEngine.verifyCitations(null, data.slides); } catch (e) { threw = true; }

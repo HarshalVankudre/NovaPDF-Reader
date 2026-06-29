@@ -8,17 +8,8 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const DEFAULT_PROVIDER = "glm";
-  const AI_PROVIDERS = ["glm", "sonnet", "haiku"];
+  const AI_PROVIDER = "opus";              // the only model: Anthropic Claude Opus 4.8 (text + high-res vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
-  const PROVIDER_ALIASES = {
-    claude: "sonnet",
-    opus: "sonnet",
-    codex: "glm",
-    grok: "glm",
-    deepseek: "glm",
-    gpt: "glm",
-  };
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -29,7 +20,6 @@
   const statSlides = $("statSlides");
   const statLectures = $("statLectures");
   const askAiBtn = $("askAiBtn");
-  const aiProviderSel = $("aiProvider");
   const aiPanel = $("aiPanel");
   const aiBar = $("aiBar");
   const attStrip = $("attStrip");
@@ -72,17 +62,6 @@
 
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-  function normalizeProviderName(provider) {
-    const raw = String(provider || DEFAULT_PROVIDER).trim().toLowerCase();
-    return PROVIDER_ALIASES[raw] || raw;
-  }
-  function selectProvider(provider) {
-    const normalized = normalizeProviderName(provider);
-    const available = AI_PROVIDERS.indexOf(normalized) !== -1 ? normalized : DEFAULT_PROVIDER;
-    aiProviderSel.value = available;
-    try { localStorage.setItem("aiProvider", available); } catch (e) {}
-    return available;
-  }
   function setAiBusy(busy) {
     aiStreaming = !!busy;
     askAiBtn.disabled = !!busy;
@@ -118,9 +97,6 @@
     wireEvents();
     if (typeof pdfjsLib !== "undefined") pdfjsLib.GlobalWorkerOptions.workerSrc = "assets/pdf.worker.min.js";
     else showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
-    try {
-      selectProvider(localStorage.getItem("aiProvider") || DEFAULT_PROVIDER);
-    } catch (e) { selectProvider(DEFAULT_PROVIDER); }
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
     try { fastMode = localStorage.getItem("aiFast") === "1"; } catch (e) {}
 
@@ -510,9 +486,10 @@
   // ===================== hidden tutor chat (streaming markdown notes) ======
   let aiThread = [];        // [{role:'user'|'assistant', content, q}]
   let aiStreaming = false;
-  let fastMode = false;     // :fast → text-only (no slide images) for a quick GLM answer
+  let fastMode = false;     // :fast → text-only (no slide images) for a quick answer
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
+  let pendingFiles = [];    // pasted text/SQL files queued for the next ask {name,text,truncated}
 
   function revealSearch(shouldFocus) {
     document.body.classList.remove("viewer-only");
@@ -552,16 +529,55 @@
       img.src = url;
     });
   }
-  // Discreet attachment strip: small thumbnails of queued pastes, each removable.
-  function renderPendingImages() {
+  // ---- pasted text / SQL files ---------------------------------------------
+  // A file copied from the OS (e.g. a .sql script) is attached as context for the
+  // next ask, just like a screenshot — read as text, never run, sent to the tutor.
+  const TEXT_FILE_RE = /\.(sql|ddl|pgsql|mysql|txt|csv|tsv|json|md|log|xml|yaml|yml)$/i;
+  function isTextFile(f) {
+    const name = (f && f.name || "").toLowerCase();
+    if (TEXT_FILE_RE.test(name)) return true;
+    const t = (f && f.type || "").toLowerCase();
+    return t.indexOf("text/") === 0 || t === "application/sql" || t === "application/json" || t === "application/xml";
+  }
+  function processTextFile(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => {
+        let text = String(r.result || "");
+        const MAX = 200000; // cap context size; truncate huge files with a note
+        const truncated = text.length > MAX;
+        if (truncated) text = text.slice(0, MAX);
+        resolve({ name: (file.name || "datei.txt"), text: text, truncated: truncated });
+      };
+      r.onerror = () => reject(new Error("read failed"));
+      r.readAsText(file);
+    });
+  }
+
+  // Discreet attachment strip: thumbnails of queued screenshots + chips for queued
+  // text/SQL files, each removable. Shown above the search box before an ask.
+  function renderAttachments() {
     if (!attStrip) return;
     attStrip.innerHTML = "";
-    attStrip.hidden = pendingImages.length === 0;
+    attStrip.hidden = pendingImages.length === 0 && pendingFiles.length === 0;
     pendingImages.forEach((im, i) => {
       const t = document.createElement("span");
       t.className = "att-thumb";
       t.innerHTML = '<img src="' + im.dataUrl + '" alt=""><button class="att-x" title="Entfernen" aria-label="Entfernen">&times;</button>';
-      t.querySelector(".att-x").addEventListener("click", () => { pendingImages.splice(i, 1); renderPendingImages(); });
+      t.querySelector(".att-x").addEventListener("click", () => { pendingImages.splice(i, 1); renderAttachments(); });
+      attStrip.appendChild(t);
+    });
+    pendingFiles.forEach((f, i) => {
+      const t = document.createElement("span");
+      t.className = "att-file";
+      t.title = f.name + (f.truncated ? " (gekürzt)" : "");
+      const label = document.createElement("span");
+      label.className = "att-file-name";
+      label.textContent = "📄 " + f.name;            // textContent → no HTML injection from filename
+      const x = document.createElement("button");
+      x.className = "att-x"; x.title = "Entfernen"; x.setAttribute("aria-label", "Entfernen"); x.innerHTML = "&times;";
+      x.addEventListener("click", () => { pendingFiles.splice(i, 1); renderAttachments(); });
+      t.appendChild(label); t.appendChild(x);
       attStrip.appendChild(t);
     });
   }
@@ -569,15 +585,15 @@
   async function runAsk() {
     const q = qInput.value.trim();
     const imgs = pendingImages.slice();              // screenshots the user pasted
-    if ((!q && !imgs.length) || aiStreaming || !engine) return;
+    const files = pendingFiles.slice();              // .sql/text files the user pasted
+    if ((!q && !imgs.length && !files.length) || aiStreaming || !engine) return;
     setAiBusy(true);
     const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
     let assistantTurn = null;
 
     try {
-      // Provider hint for the server (it still enforces modality: any image content
-      // is routed to a vision model regardless). Text-only honors the selected model.
-      const provider = isImageAsk ? "sonnet" : (aiProviderSel.value || DEFAULT_PROVIDER);
+      // The only model is Claude Opus 4.8 (multimodal: text + screenshots).
+      const provider = AI_PROVIDER;
 
       // BM25 slide text is for TEXT questions only.
       // A pasted screenshot is self-contained, so we send just the image — no slides.
@@ -597,21 +613,35 @@
         if (!fastMode && typeof pdfjsLib !== "undefined") {
           const topPages = pickedSlides.slice(0, VISION_SLIDES).map((r) => r.page);
           visionImages = (await Promise.all(topPages.map((pg) =>
-            renderSlideForVision(pg, 1200).catch(() => null)))).filter(Boolean);
+            renderSlideForVision(pg, 2000).catch(() => null)))).filter(Boolean);
         }
+      }
+
+      // attached .sql/text files → a context block appended to the prompt
+      let filesText = "";
+      if (files.length) {
+        filesText = "\n\n--- Angehängte Datei(en) (vom Nutzer eingefügt) ---\n" +
+          files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n");
       }
 
       // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
       let textPart;
       if (isImageAsk) {
         textPart = (q ? q + "\n\n" : "") +
-          "Das Bild enthält den gesamten Kontext der Aufgabe/Frage. Löse bzw. beantworte sie vollständig und " +
-          "STRUKTURIERT: gliedere mit klaren Überschriften/Abschnitten, gib je Schritt eine kurze Begründung, " +
-          "und schließe mit einem knappen Ergebnis. Nutze Listen, nummerierte Schritte oder eine Tabelle, wo es passt.";
+          "Im Bild steht die gesamte Aufgabe. Gib NUR die Lösung — direkt und so kurz wie möglich, zum schnellen Ablesen. " +
+          "Keine Begründung, keine Überschriften, kein Wiederholen der Aufgabe, kein Erklärtext, keine Folien-Zitate. " +
+          "Lückentext: nur die fehlenden Wörter, nummeriert. Multiple-Choice: nur die richtige(n) Option(en). " +
+          "Mehrteilige Aufgaben (ERM→Relationen, SQL): nur das Ergebnis als knappe Stichpunkte bzw. ein ```sql-Block, vollständig aber ohne Erklärtext." +
+          filesText;
       } else {
         let schema = "";
         try { if (window.SqlSandbox && SqlSandbox.schemaText) schema = await SqlSandbox.schemaText(); } catch (e) {}
-        textPart = q + (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
+        // with a file but no typed question, ask the model to solve/explain it
+        const ask = q || (files.length
+          ? "Beantworte die Aufgabe aus der/den angehängten Datei(en). Enthält sie keine Frage, erkläre kurz und präzise, was der SQL-Code tut."
+          : "");
+        textPart = ask + filesText +
+          (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
           (schema ? "\n\n--- Importiertes Datenbank-Schema (nutze GENAU diese Tabellen-/Spaltennamen für SQL) ---\n" + schema : "") +
           (visionImages.length ? "\n\n(Die wichtigsten Folien sind zusätzlich als Bilder beigefügt — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
       }
@@ -622,10 +652,11 @@
       for (const im of attachImgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
 
       aiThread = [];            // no history — each question is standalone
-      aiThread.push({ role: "user", content: textPart, q: q, images: imgs.map((im) => im.dataUrl) });
+      const shownQ = q || (files.length ? files.map((f) => "📄 " + f.name).join(", ") : "");
+      aiThread.push({ role: "user", content: textPart, q: shownQ, images: imgs.map((im) => im.dataUrl) });
       aiThread.push({ role: "assistant", content: "" });
       qInput.value = ""; clearBtn.hidden = true;
-      pendingImages = []; renderPendingImages();
+      pendingImages = []; pendingFiles = []; renderAttachments();
       openChat();
       renderThread();
 
@@ -731,7 +762,10 @@
       return t
         .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
         .replace(/__([^_]+)__/g, "<strong>$1</strong>")
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+        // italic: only a tightly-flanked *…* span (content starts/ends non-space,
+        // opener after start/space/'(', closer before space/punct/end). This keeps
+        // bare asterisks literal — cardinalities (0..*, 1..*), SELECT *, a * b.
+        .replace(/(^|[\s(])\*(\S|\S[^*\n]*?\S)\*(?=[\s).,!?:;'"]|$)/g, "$1<em>$2</em>")
         .replace(/`([^`]+)`/g, "<code>$1</code>");
     }
     const flushPara = () => { if (para.length) { html += "<p>" + para.map(inline).join(" ") + "</p>"; para = []; } };
@@ -792,31 +826,49 @@
       btn.title = "SQL gegen die importierte Datenbank ausführen";
       btn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.runInline(bar, code.textContent, btn); });
       bar.appendChild(btn);
+      const copyBtn = document.createElement("button");
+      copyBtn.className = "nt-run nt-copy";
+      copyBtn.textContent = "⧉ Kopieren";
+      copyBtn.title = "SQL in die Zwischenablage kopieren";
+      copyBtn.addEventListener("click", () => copyToClipboard(code.textContent, copyBtn, "⧉ Kopieren"));
+      bar.appendChild(copyBtn);
       pre.parentNode.insertBefore(bar, pre.nextSibling);
     });
+  }
+  // copy text to the clipboard with a graceful fallback; flashes "✓ Kopiert" on the button
+  function copyToClipboard(text, btn, label) {
+    const ok = () => { if (btn) { btn.textContent = "✓ Kopiert"; setTimeout(() => { btn.textContent = label; }, 1200); } };
+    const fallback = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text; ta.style.position = "fixed"; ta.style.left = "-9999px";
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        document.execCommand("copy"); document.body.removeChild(ta); ok();
+      } catch (e) {}
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(String(text)).then(ok, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
   }
   function enhanceAnswer(el) { if (!el) return; wireSlideRefs(el); wireSqlRuns(el); }
 
   // ---- stealth: typed commands in the search box (start with ":") ----------
   function handleSecretCommand(v) {
     const raw = v.slice(1).toLowerCase().trim();
-    const cmd = normalizeProviderName(raw);   // legacy provider names are aliases for GLM
     if (raw === "ai") { toggleAiBar(); }
     else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
     else if (raw === "close") { closeChat(); return; }
     else if (raw === "sql" || raw === "db" || raw === "query") { if (window.SqlSandbox) window.SqlSandbox.toggle(); qInput.value = ""; onInput(); return; }
     else if (raw === "fast" || raw === "quick") { setFastMode(true); }
     else if (raw === "vision" || raw === "slides" || raw === "bilder") { setFastMode(false); }
-    else if (AI_PROVIDERS.indexOf(cmd) !== -1) {
-      selectProvider(cmd);
-      showAiToast(aiProviderSel.options[aiProviderSel.selectedIndex].text);
-    } else { showAiToast(":" + raw + " ?"); }
+    else { showAiToast(":" + raw + " ?"); }
     qInput.value = ""; onInput();
   }
   function setFastMode(on) {
     fastMode = !!on;
     try { localStorage.setItem("aiFast", fastMode ? "1" : "0"); } catch (e) {}
-    showAiToast(fastMode ? "schnell · nur Text (GLM)" : "Folienbilder an (Vision)");
+    showAiToast(fastMode ? "schnell · nur Text" : "Folienbilder an (Vision)");
   }
   function toggleAiBar() {
     aiBar.hidden = !aiBar.hidden;
@@ -844,27 +896,41 @@
         hideSearch();
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
-        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :glm (legacy names alias to GLM)
-        if (e.ctrlKey || e.metaKey || pendingImages.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot is attached
+        if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :sql, :fast, :vision
+        if (e.ctrlKey || e.metaKey || pendingImages.length || pendingFiles.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot/file is attached
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }
     });
     clearBtn.addEventListener("click", () => { qInput.value = ""; onInput(); qInput.focus(); });
     askAiBtn.addEventListener("click", runAsk);
-    // paste a screenshot/image into the search box → queue it for the next ask (hidden)
+    // paste a screenshot OR a copied file (e.g. a .sql script) into the search box →
+    // queue it as context for the next ask. Images become vision input; text/SQL
+    // files become a context block. Plain-text pastes fall through to normal search.
     qInput.addEventListener("paste", async (e) => {
-      const items = (e.clipboardData && e.clipboardData.items) || [];
-      const files = [];
-      for (const it of items) if (it.type && it.type.indexOf("image") === 0) { const f = it.getAsFile(); if (f) files.push(f); }
-      if (!files.length) return;                 // plain text paste → let it through
+      const cd = e.clipboardData;
+      if (!cd) return;
+      const imgBlobs = [], textBlobs = [], seen = new Set();
+      const consider = (f) => {
+        if (!f) return;
+        const key = (f.name || "") + ":" + f.size;     // copied files appear in both items & files
+        if (seen.has(key)) return; seen.add(key);
+        if (f.type && f.type.indexOf("image") === 0) imgBlobs.push(f);
+        else if (isTextFile(f)) textBlobs.push(f);
+      };
+      for (const it of (cd.items || [])) { if (it.kind === "file") consider(it.getAsFile()); }
+      for (const f of (cd.files || [])) consider(f);
+      if (!imgBlobs.length && !textBlobs.length) return;  // plain text paste → let it through
       e.preventDefault();
-      for (const f of files) {
+      for (const f of imgBlobs) {
         if (pendingImages.length >= 4) break;
-        try { pendingImages.push(await processImageBlob(f, 1400)); } catch (err) {}
+        try { pendingImages.push(await processImageBlob(f, 2000)); } catch (err) {}
       }
-      renderPendingImages();
+      for (const f of textBlobs) {
+        if (pendingFiles.length >= 4) break;
+        try { pendingFiles.push(await processTextFile(f)); } catch (err) {}
+      }
+      renderAttachments();
     });
-    aiProviderSel.addEventListener("change", () => { selectProvider(aiProviderSel.value); });
     examplesEl.querySelectorAll(".chip").forEach((chip) => {
       chip.addEventListener("click", () => { qInput.value = chip.textContent; clearBtn.hidden = false; runSearch(); qInput.focus(); });
     });

@@ -35,36 +35,17 @@ function loadLocalEnv(root, target = process.env) {
 function createLLMConfig(root, config = {}, env = process.env) {
   loadLocalEnv(root, env);
   const models = config.models || {};
-  const anthropicKey = env.ANTHROPIC_API_KEY || config.anthropicApiKey || "";
   return {
     keys: {
-      glm: env.OPENROUTER_API_KEY || env.OPEN_ROUTER_API_KEY || config.openrouterApiKey || "",
-      sonnet: anthropicKey,
-      haiku: anthropicKey,
+      opus: env.ANTHROPIC_API_KEY || config.anthropicApiKey || "",
     },
     providers: {
-      glm: {
-        label: "GLM 5.2",
-        model: models.glm || "z-ai/glm-5.2",
-        kind: "openai",
-        url: "https://openrouter.ai/api/v1/chat/completions",
-        envHint: "OPENROUTER_API_KEY or OPEN_ROUTER_API_KEY",
-        requestOptions: { provider: { sort: "throughput" } },
-        vision: false,
-      },
-      sonnet: {
-        label: "Claude Sonnet 4.6",
-        model: models.sonnet || "claude-sonnet-4-6",
+      opus: {
+        label: "Claude Opus 4.8",
+        model: models.opus || "claude-opus-4-8",
         kind: "anthropic",
         envHint: "ANTHROPIC_API_KEY",
-        vision: true,
-      },
-      haiku: {
-        label: "Haiku 4.5",
-        model: models.haiku || "claude-haiku-4-5",
-        kind: "anthropic",
-        envHint: "ANTHROPIC_API_KEY",
-        vision: true,
+        vision: true, // Opus 4.8 is multimodal with high-res vision — reads dense ER diagrams
       },
     },
   };
@@ -77,21 +58,18 @@ function messagesContainImage(messages) {
   );
 }
 
-function selectProviderForMessages(messages) {
-  return messagesContainImage(messages) ? "sonnet" : "glm";
+// Opus is the only provider and is multimodal, so it serves every request —
+// text questions and pasted screenshots alike.
+function selectProviderForMessages() {
+  return "opus";
 }
 
-// Ordered list of providers to try for a request. Images must go to a vision
-// model (modality enforcement), and quality matters most for exam diagrams, so
-// vision tries Sonnet then Haiku. Text-only tries the user's preferred provider
-// first (if valid), then GLM (fast) -> Claude as resilient fallbacks. The chain
-// is what makes a single API outage non-fatal on exam day.
-function providerChainForMessages(messages, preferred) {
-  if (messagesContainImage(messages)) return ["sonnet", "haiku"];
-  const base = ["glm", "sonnet", "haiku"];
-  const pref = String(preferred || "").trim().toLowerCase();
-  if (base.indexOf(pref) !== -1) return [pref].concat(base.filter((p) => p !== pref));
-  return base;
+// Single-provider setup: every request resolves to Opus (text and images).
+// There is no cross-provider outage fallback — streamAnthropic() runs the SDK's
+// own request, and the OpenAI path keeps a transient-error retry for any future
+// provider. Signature kept (messages, preferred) for call-site/test compatibility.
+function providerChainForMessages() {
+  return ["opus"];
 }
 
 function buildOpenAIRequestBody(provider, fields) {

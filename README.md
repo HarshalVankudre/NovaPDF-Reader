@@ -48,7 +48,7 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
 Every question — text and pasted screenshots alike — uses Anthropic
-**Claude Opus 4.8** (`claude-opus-4-8`); it's multimodal with high-res vision, so it reads
+**Claude Sonnet 5** (`claude-sonnet-5`); it's multimodal with high-res vision, so it reads
 screenshots and slide images directly. It's the only model — there's no picker
 and no switching command. The proxy endpoints are `/q` (streaming chat) and
 `/llm` (single-shot, legacy) — neutral names, keys server-side only.
@@ -64,7 +64,7 @@ setx ANTHROPIC_API_KEY "sk-ant-..."
 
 The server also loads `.env` and `.env.txt` from the project directory.
 Alternatively, copy `serve.config.example.json` to `serve.config.json`
-(gitignored). The model ID is configurable under `models.opus`.
+(gitignored). The model ID is configurable under `models.sonnet`.
 
 ## How it works
 

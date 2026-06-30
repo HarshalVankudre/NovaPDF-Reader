@@ -8,7 +8,7 @@ const app = fs.readFileSync(path.join(ROOT, "assets", "app.js"), "utf8");
 
 // Single hardcoded model: no provider dropdown, no aliases, no switching commands.
 assert.doesNotMatch(html, /id="aiProvider"/, "the provider selector should be gone");
-assert.match(app, /const AI_PROVIDER = "opus";/, "Opus is the only model");
+assert.match(app, /const AI_PROVIDER = "sonnet";/, "Sonnet is the only model");
 assert.doesNotMatch(app, /PROVIDER_ALIASES/, "provider aliases should be removed");
 assert.doesNotMatch(app, /aiProviderSel/, "the provider selector wiring should be removed");
 // every ask sends the one model

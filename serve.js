@@ -501,7 +501,7 @@ function normalizeCell(v) {
   return v;
 }
 
-const server = http.createServer((req, res) => {
+function handleRequest(req, res) {
   let urlPath;
   try { urlPath = decodeURIComponent(req.url.split("?")[0]); }
   catch { urlPath = req.url.split("?")[0]; }
@@ -662,18 +662,26 @@ const server = http.createServer((req, res) => {
       count(fs.createReadStream(filePath).on("error", onErr)).pipe(res);
     }
   });
-});
+}
 
-server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} });
-server.listen(PORT, () => {
-  console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
-  console.log(`serving ${ROOT}`);
-  console.log("LLM key present: sonnet=" + !!KEYS.sonnet);
-  mysqlStatus().then((s) => {
-    if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
-    else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");
-    try { const st = fs.statSync(SNAPSHOT_PATH); console.log("SQL snapshot: " + path.basename(SNAPSHOT_PATH) + " present (" + Math.round(st.size / 1024) + " KB) — app auto-loads it"); }
-    catch (e) { console.log("SQL snapshot: none yet — run `node mysql-to-sqlite.js --database <db>` to create " + path.relative(ROOT, SNAPSHOT_PATH)); }
-  }).catch(() => {});
-  console.log("(Ctrl+C to stop)");
-});
+// The same handler runs in two modes: `node serve.js` starts the local HTTP
+// server below; on Vercel, api/index.js imports handleRequest and runs it as
+// a serverless function (no listen()).
+module.exports = { handleRequest };
+
+if (require.main === module) {
+  const server = http.createServer(handleRequest);
+  server.on("clientError", (err, socket) => { try { socket.destroy(); } catch {} });
+  server.listen(PORT, () => {
+    console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
+    console.log(`serving ${ROOT}`);
+    console.log("LLM key present: sonnet=" + !!KEYS.sonnet);
+    mysqlStatus().then((s) => {
+      if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
+      else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");
+      try { const st = fs.statSync(SNAPSHOT_PATH); console.log("SQL snapshot: " + path.basename(SNAPSHOT_PATH) + " present (" + Math.round(st.size / 1024) + " KB) — app auto-loads it"); }
+      catch (e) { console.log("SQL snapshot: none yet — run `node mysql-to-sqlite.js --database <db>` to create " + path.relative(ROOT, SNAPSHOT_PATH)); }
+    }).catch(() => {});
+    console.log("(Ctrl+C to stop)");
+  });
+}

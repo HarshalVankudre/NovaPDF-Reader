@@ -62,6 +62,10 @@ Changing the model means editing **two places in sync**:
 
 The model ID is overridable at runtime under `models.sonnet` in `serve.config.json`. The OpenAI-compatible transport (`askOpenAICompatible`/`streamOpenAICompatible`/`buildOpenAIRequestBody`) is kept dormant in `serve.js` for re-adding an OpenAI-style provider later.
 
+## Vercel deployment
+
+The same server runs on Vercel: `api/index.js` wraps `handleRequest` (exported from `serve.js`, which only calls `listen()` when run directly), and `vercel.json` routes **every** path through that one function — nothing is served from Vercel's static layer, so the `/lec` disguise and the `assets/lectures/*.pdf` block behave exactly as locally. `ANTHROPIC_API_KEY` is set as a Vercel environment variable; pushes to `main` auto-deploy via the Vercel↔GitHub integration. MySQL is never reachable from the cloud, so the SQL sandbox always uses in-browser SQLite there, and `data/exam.sqlite` is gitignored so `/sql/filestatus` reports absent on Vercel — drag the snapshot into the sandbox instead.
+
 ## The stealth disguise is load-bearing
 
 The app intentionally masquerades as a plain PDF viewer; this is a product requirement, not incidental styling — preserve it when changing the UI:

@@ -1,4 +1,5 @@
 serve.config.json
+.vercel/
 .env
 .env.*
 *.env

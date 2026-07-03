@@ -628,10 +628,9 @@
       let textPart;
       if (isImageAsk) {
         textPart = (q ? q + "\n\n" : "") +
-          "Im Bild steht die gesamte Aufgabe. Gib NUR die Lösung — direkt und so kurz wie möglich, zum schnellen Ablesen. " +
-          "Keine Begründung, keine Überschriften, kein Wiederholen der Aufgabe, kein Erklärtext, keine Folien-Zitate. " +
-          "Lückentext: nur die fehlenden Wörter, nummeriert. Multiple-Choice: nur die richtige(n) Option(en). " +
-          "Mehrteilige Aufgaben (ERM→Relationen, SQL): nur das Ergebnis als knappe Stichpunkte bzw. ein ```sql-Block, vollständig aber ohne Erklärtext." +
+          "Im Bild steht die gesamte Aufgabe. Gib NUR die Lösung — direkt, vollständig und so knapp wie möglich, zum schnellen Ablesen. " +
+          "Wähle selbst das übersichtlichste Format passend zur Aufgabe (Markdown wird angezeigt: Stichpunkte, nummerierte Zeilen, Tabellen, ```sql-Blöcke …). " +
+          "Kein Erklärtext (außer die Aufgabe verlangt ihn), kein Wiederholen der Aufgabe, keine Folien-Zitate." +
           filesText;
       } else {
         let schema = "";
@@ -793,6 +792,7 @@
         html += tbl + "</tbody></table>";
         continue;
       }
+      if (/^\s*([-*_])\s*(?:\1\s*){2,}$/.test(line)) { flushPara(); closeList(); html += "<hr>"; continue; }
       let m;
       if ((m = line.match(/^(#{1,6})\s+(.*)$/))) { flushPara(); closeList(); const lvl = Math.min(m[1].length + 3, 6); html += "<h" + lvl + ">" + inline(m[2]) + "</h" + lvl + ">"; continue; }
       if ((m = line.match(/^\s*[-*+]\s+(.*)$/))) { flushPara(); if (listType !== "ul") { closeList(); listType = "ul"; html += "<ul>"; } html += "<li>" + inline(m[1]) + "</li>"; continue; }

@@ -37,15 +37,15 @@ function createLLMConfig(root, config = {}, env = process.env) {
   const models = config.models || {};
   return {
     keys: {
-      opus: env.ANTHROPIC_API_KEY || config.anthropicApiKey || "",
+      sonnet: env.ANTHROPIC_API_KEY || config.anthropicApiKey || "",
     },
     providers: {
-      opus: {
-        label: "Claude Opus 4.8",
-        model: models.opus || "claude-opus-4-8",
+      sonnet: {
+        label: "Claude Sonnet 5",
+        model: models.sonnet || "claude-sonnet-5",
         kind: "anthropic",
         envHint: "ANTHROPIC_API_KEY",
-        vision: true, // Opus 4.8 is multimodal with high-res vision — reads dense ER diagrams
+        vision: true, // Sonnet 5 is multimodal with high-res vision — reads dense ER diagrams
       },
     },
   };
@@ -58,18 +58,18 @@ function messagesContainImage(messages) {
   );
 }
 
-// Opus is the only provider and is multimodal, so it serves every request —
+// Sonnet is the only provider and is multimodal, so it serves every request —
 // text questions and pasted screenshots alike.
 function selectProviderForMessages() {
-  return "opus";
+  return "sonnet";
 }
 
-// Single-provider setup: every request resolves to Opus (text and images).
+// Single-provider setup: every request resolves to Sonnet (text and images).
 // There is no cross-provider outage fallback — streamAnthropic() runs the SDK's
 // own request, and the OpenAI path keeps a transient-error retry for any future
 // provider. Signature kept (messages, preferred) for call-site/test compatibility.
 function providerChainForMessages() {
-  return ["opus"];
+  return ["sonnet"];
 }
 
 function buildOpenAIRequestBody(provider, fields) {

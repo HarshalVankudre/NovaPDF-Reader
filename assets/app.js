@@ -8,7 +8,7 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const AI_PROVIDER = "opus";              // the only model: Anthropic Claude Opus 4.8 (text + high-res vision)
+  const AI_PROVIDER = "sonnet";            // the only model: Anthropic Claude Sonnet 5 (text + high-res vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
 
   const $ = (id) => document.getElementById(id);
@@ -592,7 +592,7 @@
     let assistantTurn = null;
 
     try {
-      // The only model is Claude Opus 4.8 (multimodal: text + screenshots).
+      // The only model is Claude Sonnet 5 (multimodal: text + screenshots).
       const provider = AI_PROVIDER;
 
       // BM25 slide text is for TEXT questions only.

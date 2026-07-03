@@ -36,16 +36,16 @@ try {
   assert.strictEqual(target.OPEN_ROUTER_API_KEY, "compat");
   assert.strictEqual(target.ANTHROPIC_API_KEY, "ak-test");
 
-  const config = createLLMConfig(dir, { models: { opus: "custom-opus" } }, target);
-  assert.strictEqual(config.keys.opus, "ak-test", "ANTHROPIC_API_KEY powers Opus");
-  assert.deepStrictEqual(Object.keys(config.providers), ["opus"], "Opus is the only provider");
-  assert.strictEqual(config.providers.opus.model, "custom-opus");
-  assert.strictEqual(config.providers.opus.kind, "anthropic");
-  assert.strictEqual(config.providers.opus.vision, true, "Opus handles vision too");
+  const config = createLLMConfig(dir, { models: { sonnet: "custom-sonnet" } }, target);
+  assert.strictEqual(config.keys.sonnet, "ak-test", "ANTHROPIC_API_KEY powers Sonnet");
+  assert.deepStrictEqual(Object.keys(config.providers), ["sonnet"], "Sonnet is the only provider");
+  assert.strictEqual(config.providers.sonnet.model, "custom-sonnet");
+  assert.strictEqual(config.providers.sonnet.kind, "anthropic");
+  assert.strictEqual(config.providers.sonnet.vision, true, "Sonnet handles vision too");
 
   const compatOnly = createLLMConfig(cleanDir, {}, { ANTHROPIC_API_KEY: "anthropic-only" });
-  assert.strictEqual(compatOnly.keys.opus, "anthropic-only");
-  assert.strictEqual(compatOnly.providers.opus.model, "claude-opus-4-8");
+  assert.strictEqual(compatOnly.keys.sonnet, "anthropic-only");
+  assert.strictEqual(compatOnly.providers.sonnet.model, "claude-sonnet-5");
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(cleanDir, { recursive: true, force: true });
@@ -55,13 +55,13 @@ const textMessages = [{ role: "user", content: [{ type: "text", text: "ACID?" }]
 const imageMessages = [{ role: "user", content: [{ type: "image", data: "abc" }] }];
 assert.strictEqual(messagesContainImage(textMessages), false);
 assert.strictEqual(messagesContainImage(imageMessages), true);
-assert.strictEqual(selectProviderForMessages(textMessages), "opus");
-assert.strictEqual(selectProviderForMessages(imageMessages), "opus", "Opus serves vision too");
+assert.strictEqual(selectProviderForMessages(textMessages), "sonnet");
+assert.strictEqual(selectProviderForMessages(imageMessages), "sonnet", "Sonnet serves vision too");
 
-// single-provider setup: every request resolves to Opus (text and images alike)
-assert.deepStrictEqual(providerChainForMessages(imageMessages), ["opus"]);
-assert.deepStrictEqual(providerChainForMessages(textMessages), ["opus"]);
-assert.deepStrictEqual(providerChainForMessages(textMessages, "bogus"), ["opus"], "preference no longer changes the single-provider chain");
+// single-provider setup: every request resolves to Sonnet (text and images alike)
+assert.deepStrictEqual(providerChainForMessages(imageMessages), ["sonnet"]);
+assert.deepStrictEqual(providerChainForMessages(textMessages), ["sonnet"]);
+assert.deepStrictEqual(providerChainForMessages(textMessages, "bogus"), ["sonnet"], "preference no longer changes the single-provider chain");
 
 // buildOpenAIRequestBody is a generic util (kept for any OpenAI-compatible provider)
 const body = buildOpenAIRequestBody(

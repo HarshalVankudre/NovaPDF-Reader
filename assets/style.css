@@ -162,6 +162,7 @@ body.viewer-only .sidebar { display: none; }
 }
 .nt-q:first-child { margin-top: 6px; }
 .nt-a { font-size: 13.5px; line-height: 1.62; color: var(--ink); }
+.nt-a > p:first-child { font-size: 14.5px; font-weight: 600; } /* the verdict line reads at a glance */
 .nt-a h4, .nt-a h5, .nt-a h6 { margin: 12px 0 5px; line-height: 1.3; color: var(--ink); }
 .nt-a h4 { font-size: 15px; }
 .nt-a h5 { font-size: 13.5px; }
@@ -173,6 +174,11 @@ body.viewer-only .sidebar { display: none; }
 .nt-a code { font-family: var(--mono); font-size: 12px; background: var(--bg); padding: 1px 5px; border-radius: 4px; color: var(--green-darker); }
 .nt-a pre.nt-code { background: #1f2630; color: #e6edf3; border-radius: 8px; padding: 11px 13px; overflow-x: auto; margin: 9px 0; }
 .nt-a pre.nt-code code { background: none; color: inherit; padding: 0; font-size: 12px; }
+/* SQL token colors inside answer code blocks (highlightSql in app.js) */
+.nt-code .sq-k { color: #7ce38b; font-weight: 600; }   /* keywords  */
+.nt-code .sq-s { color: #f0c674; }                     /* strings   */
+.nt-code .sq-n { color: #79b8ff; }                     /* numbers   */
+.nt-code .sq-c { color: #8b98a5; font-style: italic; } /* comments  */
 .nt-a blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .nt-a hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
 .nt-a table.nt-table { border-collapse: collapse; margin: 9px 0; font-size: 12.5px; width: 100%; }
@@ -507,9 +513,48 @@ body.viewer-only .sidebar { display: none; }
 .sbx-null { color: var(--muted-2); font-style: italic; }
 .sbx-count { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
 .sbx-busy .sbx-run { opacity: .6; pointer-events: none; }
+.sbx-fix { margin-top: 8px; }
+.nt-sql-result .sbx-fix { margin: 6px 0 0; padding: 5px 12px; font-size: 12px; }
+
+/* region snip (Alt+drag or the ✂ button): marquee + armed cursor */
+.canvas-scroll.snip-armed, .canvas-scroll.snip-armed #pdfCanvas { cursor: crosshair; }
+.snip-marq {
+  position: absolute; z-index: 5; pointer-events: none; border-radius: 2px;
+  border: 1.5px dashed var(--green-dark); background: rgba(47, 141, 70, .10);
+}
+.tb-btn.tb-on { background: var(--green-tint); color: var(--green-darker); }
+
+/* floating slide preview when hovering a (Folie N) citation */
+.ref-preview {
+  position: fixed; z-index: 400; background: #fff; border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: var(--shadow-lg); padding: 6px 6px 3px;
+  opacity: 0; transform: translateY(5px) scale(.98); pointer-events: none;
+  transition: opacity .15s ease, transform .15s ease;
+}
+.ref-preview.show { opacity: 1; transform: none; }
+.ref-preview canvas { display: block; border-radius: 6px; border: 1px solid var(--border-2); }
+.ref-preview .rp-cap { font-size: 11px; font-weight: 600; color: var(--muted); text-align: center; padding: 4px 2px 3px; }
+
+/* soft pulse of the yellow matches after jumping via a citation link */
+.hl-layer.hl-pulse .hl-box { animation: hlpulse 1.3s ease; }
+@keyframes hlpulse {
+  0%, 100% { box-shadow: none; }
+  45% { box-shadow: 0 0 0 7px rgba(255, 208, 0, .38); }
+}
+
+/* pasted exam tasks keep their line breaks in the question bubble */
+.nt-q { white-space: pre-wrap; }
 
 /* tutor answer: Run button under a generated SQL block + its inline result */
 .nt-runbar { margin: -4px 0 9px; }
+.nt-actions { margin: 10px 0 2px; }
+
+/* Gegenprüfung status chip: pulses while checking, then ✓✓ / ⚠ verdict */
+.nt-check { display: inline-block; margin-left: 10px; font-size: 11.5px; font-weight: 700; color: var(--muted); vertical-align: middle; }
+.nt-check[data-state="checking"], .nt-check[data-state="appeal"] { color: var(--muted-2); animation: chkpulse 1.6s ease infinite; }
+.nt-check[data-state="ok"], .nt-check[data-state="ok2"] { color: var(--green-darker); }
+.nt-check[data-state="fixed"], .nt-check[data-state="warn"] { color: #a05a00; }
+@keyframes chkpulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
 .nt-run { border: 1px solid var(--green-tint2); border-radius: 7px; padding: 5px 12px; font-size: 12px; font-weight: 700;
   cursor: pointer; background: var(--green-tint); color: var(--green-darker); }
 .nt-run:hover { background: var(--green-tint2); }

@@ -218,16 +218,48 @@ async function askLLM(question, candidates) {
 }
 
 // ---- streaming tutor chat ----
+// Structured on purpose: Sonnet 5 follows explicit, sectioned instructions very
+// literally, so each rule is stated once, positively, in its own line. The
+// stealth constraint (never mention being an AI / generated text) is load-bearing.
 const CHAT_SYSTEM =
-  'You are the course notes for the German database course "DSCB140 - Datenbanken & Datenkunde". ' +
-  'Use ONLY the provided slide excerpts/images (and any pasted screenshot or attached file) - never invent facts not present in them. Answer in the question\'s language. ' +
-  'Give exactly what was asked: the answer itself - no preamble ("Die Antwort ist", "Laut Folie"), no restating the question, no recap, no reasoning text. ' +
-  'Explain only when the question itself asks for it (warum, erkläre, begründe, Herleitung/Schritte) - and then as tersely as possible. ' +
-  'Format for the fastest possible reading: Markdown is rendered (bold, lists, numbered lines, tables, code blocks). ' +
-  'You decide the layout per question - whatever lets the reader grasp the answer at a glance. A bare term when that answers it; ' +
-  'structure (a list, a table, a ```sql block - always complete, never cut off mid-statement) when it genuinely speeds up scanning. Structure is a tool for readability, not decoration. ' +
-  'End with the source as "(Folie N)" (global page number) and nothing after it. ' +
-  'If the slides lack the answer, say so in one short line. Never mention being an AI or that this is generated.';
+  'You are the course notes ("Notizen") for the German university database course ' +
+  '"DSCB140 - Datenbanken & Datenkunde" (lectures VL1-VL7, 317 slides with global slide numbers). ' +
+  'Context that may accompany a question: slide excerpts as text, the most relevant slides as images ' +
+  '(each labeled "Bild von Folie N"), a pasted exam screenshot, attached files (e.g. .sql), the imported ' +
+  'database schema with its SQL dialect, and earlier notes of this thread.\n' +
+  '\n' +
+  'PRECISION\n' +
+  '- A typed or pasted exam task (text or screenshot) is the PRIMARY object: read it completely and solve ' +
+  'EVERY sub-task (a, b, c, ...). Slides are supporting reference material, not the subject.\n' +
+  '- Ground answers in the provided material where it covers the task. Read attached images carefully: ' +
+  'ER diagrams, cardinalities, table contents and SQL on them are often missing from the extracted text.\n' +
+  '- Copy names, numbers and terminology character-exactly from the source; prefer the exact German ' +
+  'terms the slides use. Never invent slide numbers.\n' +
+  '- Verify before answering: for multiple choice check EVERY option individually; for cardinalities and ' +
+  '(min,max) notation check both directions of the relationship; for normal forms test the definition ' +
+  'against the given attributes/dependencies; recompute any arithmetic.\n' +
+  '- If the provided material does not cover the question, answer correctly from standard database ' +
+  'knowledge and end with "(allg.)" instead of a slide citation. A correct uncited answer beats a refusal.\n' +
+  '\n' +
+  'SQL\n' +
+  '- Use EXACTLY the table and column names from the provided schema - never invent, translate or ' +
+  '"correct" them. Match the stated dialect (MySQL unless the context says SQLite).\n' +
+  '- One complete, runnable statement per task in a ```sql block, never cut off mid-statement; ' +
+  'UPPERCASE keywords. If the task names a construct (JOIN, Subquery, HAVING, VIEW, ...), use that construct.\n' +
+  '\n' +
+  'FORM (Markdown is rendered: bold, lists, tables, code blocks)\n' +
+  '- Answer in the question\'s language. Give exactly what was asked - no preamble ("Die Antwort ist", ' +
+  '"Laut Folie"), no restating the question, no recap.\n' +
+  '- Explain only when explicitly asked (warum, erkläre, begründe, Herleitung/Schritte) - then as tersely as possible.\n' +
+  '- Multiple choice: the correct option(s) verbatim. True/false: the verdict. Compute/derive tasks: the ' +
+  'result first, the minimal derivation only if the task demands showing it.\n' +
+  '- Choose the layout that is fastest to read: a bare term when that answers it; a list, table or code ' +
+  'block only when it genuinely speeds up scanning. Structure is a tool for readability, not decoration.\n' +
+  '- End with the source: "(Folie N)" or "(Folie N, M)" - global page numbers, only slides that were ' +
+  'provided AND actually support the answer, nothing after it. Screenshot tasks need no citation.\n' +
+  '- Follow-up questions refer to the earlier notes of this thread; the slide context attached to the ' +
+  'newest question is the freshest.\n' +
+  '- Never mention being an AI, a model, or that this text is generated - this is a notes document.';
 
 // Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to
 // each provider's wire format. Plain-string content is passed through untouched.
@@ -255,20 +287,29 @@ function toOpenAIMessages(messages) {
 // that phase room. Depth is set by REASONING_EFFORT, not a token budget
 // (budget_tokens is removed on Sonnet 5; adaptive thinking + effort replaces it).
 const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
-const REASONING_EFFORT = "high";    // adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day); drop to "medium" for snappier answers
+const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day)
+// The client may override effort per request (whitelisted): ":fast" answers run
+// at "medium" for latency; the cross-check arbiter runs at "xhigh" for depth.
+const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+function normalizeEffort(e) {
+  e = String(e || "").toLowerCase();
+  return EFFORTS.has(e) ? e : REASONING_EFFORT;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function streamAnthropic(p, key, messages, write, signal) {
+async function streamAnthropic(p, key, messages, write, signal, effort) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
+  // NOTE: do not add temperature/top_p/top_k — Sonnet 5 rejects non-default
+  // sampling params with a 400. Precision is steered via CHAT_SYSTEM + effort.
   const stream = client.messages.stream(
     {
       model: p.model,
       max_tokens: 32000,                              // thinking counts toward max_tokens; headroom prevents truncated answers at high effort
       thinking: { type: "adaptive" },                 // Sonnet 5 adaptive thinking (replaces budget_tokens)
-      output_config: { effort: REASONING_EFFORT },    // how deeply it reasons before answering
+      output_config: { effort: effort || REASONING_EFFORT }, // how deeply it reasons before answering
       system: CHAT_SYSTEM,
       messages: toClaudeMessages(messages),
     },
@@ -344,6 +385,7 @@ function normalizeProvider(name) {
 // provider (we can't un-send a partial answer). This is the exam-day safety net.
 async function streamWithFallback(payload, res) {
   const messages = payload.messages;
+  const effort = normalizeEffort(payload && payload.effort);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
   let wrote = false;
   let lastErr = null;
@@ -357,8 +399,8 @@ async function streamWithFallback(payload, res) {
     const write = (t) => { if (t == null || t === "") return; got = true; wrote = true; clearTimeout(timer); try { res.write(t); } catch (e) {} };
     const timer = setTimeout(() => { if (!got) { try { ctrl.abort(); } catch (e) {} } }, FIRST_TOKEN_MS);
     try {
-      console.log("POST /q  try[" + i + "]=" + name + " (" + p.model + ")");
-      if (p.kind === "anthropic") await streamAnthropic(p, key, messages, write, ctrl.signal);
+      console.log("POST /q  try[" + i + "]=" + name + " (" + p.model + ", effort=" + effort + ")");
+      if (p.kind === "anthropic") await streamAnthropic(p, key, messages, write, ctrl.signal, effort);
       else await streamOpenAICompatible(p, key, messages, write, ctrl.signal);
       clearTimeout(timer);
       return { provider: name };

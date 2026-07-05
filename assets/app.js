@@ -10,6 +10,9 @@
   const DATA_URL = "data/slides.json";
   const AI_PROVIDER = "sonnet";            // the only model: Anthropic Claude Sonnet 5 (text + high-res vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
+  const VISION_MAX = 4;    // cap incl. extra diagram-heavy slides pulled from ranks 4-6
+  const VISION_WIDTH = 2200; // vision render width — within Sonnet 5's 2576px high-res limit, so no API-side downscale
+  const THIN_TEXT = 180;   // slides with less extracted text than this are likely pure diagrams (content lives in the image)
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -48,12 +51,14 @@
   let pdfTotal = 0;
   let pageNum = 1;
   let compiled = null;          // current compiled query (for snippet highlight)
+  let pulsePage = 0;            // flash the yellow matches on this page after a citation jump
   let pageToLecture = [];       // pageToLecture[p] = lecture object
   let frameLecture = null;      // lecture number currently shown in the main viewer
   let viewToken = 0;            // cancels superseded navigations
   let mainRenderTask = null;    // current pdf.js render task (cancel on nav)
   let mainScale = 0;            // current effective scale of the main viewer
   let manualZoom = false;       // user has used the zoom buttons
+  let zoomAnchor = null;        // cursor-anchored zoom: scroll fixup applied right after the re-render
   let curMainPage = 0, curMainCW = 0, curMainCH = 0;
   const bytesCache = new Map(); // lectureNum -> Promise<Uint8Array>
   const docCache = new Map();   // lectureNum -> Promise<PDFDocumentProxy>
@@ -99,6 +104,10 @@
     else showViewerError("PDF.js could not load", "Search is still available, but the slide viewer needs <code>assets/pdf.min.js</code>.");
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
     try { fastMode = localStorage.getItem("aiFast") === "1"; } catch (e) {}
+    try { autoRunSql = localStorage.getItem("aiAutoRun") !== "0"; } catch (e) {} // read-only SQL auto-runs by default
+    try { autoAsk = localStorage.getItem("aiAutoAsk") !== "0"; } catch (e) {}    // paste-to-ask on by default
+    try { checkMode = localStorage.getItem("aiCheck") !== "0"; } catch (e) {}    // Gegenprüfung on by default
+    restoreThread(); // notes survive a reload (text only); they reappear on the next ask or :notes
 
     document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
 
@@ -124,6 +133,13 @@
   }
 
   const lectureShort = (L) => (L && L.name ? L.name.split(" · ")[0] : "VL" + (L ? L.num : "?"));
+  // slide record for a global page number (slides are page-ordered, so O(1) with a safe fallback)
+  const slideByPage = (p) => {
+    if (!data) return null;
+    const s = data.slides[p - 1];
+    if (s && s.page === p) return s;
+    return data.slides.find((x) => x && x.page === p) || null;
+  };
 
   // ===================== viewer (pdf.js canvas + highlight overlay) =========
   // Each lecture is fetched once from /lec/<n> (served as text/plain so the
@@ -189,17 +205,19 @@
 
   // Render a slide to a JPEG data payload for the vision model. Rendered fresh at
   // a higher resolution than the thumbnail so diagrams/ER-models/SQL stay legible.
+  // Sonnet 5 accepts up to 2576px on the long edge without server-side downscaling,
+  // so everything rendered at VISION_WIDTH reaches the model pixel-for-pixel.
   async function renderSlideForVision(globalPage, width) {
     const L = pageToLecture[globalPage];
     const doc = await getLectureDoc(L);
     const page = await doc.getPage(globalPage - L.startPage + 1);
     const base = page.getViewport({ scale: 1 });
-    const scale = (width || 1200) / base.width;
+    const scale = (width || VISION_WIDTH) / base.width;
     const vp = page.getViewport({ scale });
     const c = document.createElement("canvas");
     c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
     await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
-    const url = c.toDataURL("image/jpeg", 0.82);
+    const url = c.toDataURL("image/jpeg", 0.85);
     return { media_type: "image/jpeg", data: url.split(",")[1] };
   }
 
@@ -224,6 +242,7 @@
         const RE = /[\p{L}\p{N}]+/gu;
         try {
           const tc = await page.getTextContent();
+          const styles = tc.styles || {};
           for (const it of tc.items) {
             const str = it.str || "";
             if (!str.trim()) continue;
@@ -231,7 +250,11 @@
             const fontH = Math.hypot(tx[2], tx[3]) || 10;
             const x0 = tx[4], yTop = tx[5] - fontH;
             const runW = it.width || 0; // already in scale-1 page units
-            meas.font = fontH + "px sans-serif";
+            // measure with the run's real font family (serif/sans/mono from the
+            // pdf.js style map) — proportions match the PDF better than a fixed
+            // sans-serif guess, so per-word boxes hug the words more tightly
+            const fam = (styles[it.fontName] && styles[it.fontName].fontFamily) || "sans-serif";
+            meas.font = fontH + "px " + fam;
             const full = meas.measureText(str).width || 1;
             const k = runW > 0 ? runW / full : 0; // map our metrics onto the true run width
             let m; RE.lastIndex = 0;
@@ -270,6 +293,81 @@
       frag.appendChild(d);
     }
     layerEl.appendChild(frag);
+  }
+
+  // ===================== region snip → ask (Alt+drag / ✂) ==================
+  // Draw a box on the slide (hold Alt and drag, or arm once via the ✂ button):
+  // that region is cut out of a fresh high-res render and queued as an image
+  // question — the tutor is told which Folie the snippet came from, so the
+  // answer is grounded in that slide's text AND its pixels.
+  let snipArm = false;
+  let snipMarq = null;
+  function setSnipArm(on) {
+    snipArm = !!on;
+    canvasScroll.classList.toggle("snip-armed", snipArm);
+    const b = $("snipBtn");
+    if (b) b.classList.toggle("tb-on", snipArm);
+  }
+  async function snipRegion(page, nx, ny, nw, nh) {
+    const L = pageToLecture[page];
+    const doc = await getLectureDoc(L);
+    const pg = await doc.getPage(page - L.startPage + 1);
+    const base = pg.getViewport({ scale: 1 });
+    const vp = pg.getViewport({ scale: VISION_WIDTH / base.width }); // crop from a vision-quality render, not the screen canvas
+    const full = document.createElement("canvas");
+    full.width = Math.floor(vp.width); full.height = Math.floor(vp.height);
+    await pg.render({ canvasContext: full.getContext("2d"), viewport: vp }).promise;
+    const cx = Math.round(nx * full.width), cy = Math.round(ny * full.height);
+    const cw = Math.max(8, Math.round(nw * full.width)), ch = Math.max(8, Math.round(nh * full.height));
+    const out = document.createElement("canvas");
+    out.width = cw; out.height = ch;
+    out.getContext("2d").drawImage(full, cx, cy, cw, ch, 0, 0, cw, ch);
+    const dataUrl = out.toDataURL("image/png");
+    return { media_type: "image/png", data: dataUrl.split(",")[1], dataUrl: dataUrl, page: page };
+  }
+  function wireSnip() {
+    pageWrap.addEventListener("mousedown", (e) => {
+      if (e.button !== 0 || !(e.altKey || snipArm)) return;
+      e.preventDefault();
+      const page = pageNum;
+      const r0 = pageWrap.getBoundingClientRect();
+      const sx = e.clientX - r0.left, sy = e.clientY - r0.top;
+      if (!snipMarq) { snipMarq = document.createElement("div"); snipMarq.className = "snip-marq"; }
+      pageWrap.appendChild(snipMarq);
+      const set = (x, y, w, h) => { snipMarq.style.cssText = "left:" + x + "px;top:" + y + "px;width:" + w + "px;height:" + h + "px"; };
+      set(sx, sy, 0, 0);
+      const clampTo = (ev, r) => [
+        Math.min(Math.max(ev.clientX - r.left, 0), r.width),
+        Math.min(Math.max(ev.clientY - r.top, 0), r.height),
+      ];
+      const move = (ev) => {
+        const r = pageWrap.getBoundingClientRect();
+        const c = clampTo(ev, r);
+        set(Math.min(sx, c[0]), Math.min(sy, c[1]), Math.abs(c[0] - sx), Math.abs(c[1] - sy));
+      };
+      const up = async (ev) => {
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        const r = pageWrap.getBoundingClientRect();
+        const c = clampTo(ev, r);
+        const x = Math.min(sx, c[0]), y = Math.min(sy, c[1]);
+        const w = Math.abs(c[0] - sx), h = Math.abs(c[1] - sy);
+        try { snipMarq.remove(); } catch (e2) {}
+        setSnipArm(false);
+        if (w < 16 || h < 16) return; // treat as a mis-click, not a snip
+        if (pendingImages.length >= 4) { showAiToast("max. 4 Anhänge"); return; }
+        showAiToast("Ausschnitt wird erstellt…");
+        try {
+          const im = await snipRegion(page, x / r.width, y / r.height, w / r.width, h / r.height);
+          pendingImages.push(im);
+          renderAttachments();
+          revealSearch(true);
+          showAiToast("Ausschnitt von Folie " + page + " angehängt — Frage tippen · Enter");
+        } catch (e2) { showAiToast("Ausschnitt fehlgeschlagen"); }
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
   }
 
   async function renderCardThumb(card, globalPage, cq) {
@@ -346,9 +444,32 @@
     if (token !== viewToken) return;
     mainRenderTask = null;
     loadingEl.hidden = true; pageWrap.hidden = false;
+    if (zoomAnchor) { // keep the point under the cursor stationary across the zoom re-render
+      const z = zoomAnchor; zoomAnchor = null;
+      canvasScroll.scrollLeft = (z.sx + z.ax) * z.ratio - z.ax;
+      canvasScroll.scrollTop = (z.sy + z.ay) * z.ratio - z.ay;
+    }
     zoomLevel.textContent = Math.round(scale * 100) + "%";
     curMainPage = num; curMainCW = cw; curMainCH = ch;
     drawMainHighlights(num);
+  }
+
+  // Zoom the main viewer by `factor`, anchored at a viewport point (Ctrl+wheel,
+  // trackpad pinch, or the +/- buttons anchored at the center). Rapid wheel ticks
+  // compound into one pending anchor so the scroll fixup stays consistent even
+  // when intermediate renders get cancelled.
+  function zoomAt(factor, clientX, clientY) {
+    if (!curMainPage) return;
+    const old = mainScale || 1;
+    const ns = Math.min(8, Math.max(0.2, old * factor));
+    if (ns === old) return;
+    manualZoom = true;
+    const r = canvasScroll.getBoundingClientRect();
+    const ax = clientX - r.left, ay = clientY - r.top;
+    if (zoomAnchor) { zoomAnchor.ratio *= ns / old; zoomAnchor.ax = ax; zoomAnchor.ay = ay; }
+    else zoomAnchor = { ratio: ns / old, ax, ay, sx: canvasScroll.scrollLeft, sy: canvasScroll.scrollTop };
+    mainScale = ns;
+    renderMain(pageNum);
   }
 
   // Yellow match overlay on the main viewer. Uses the normalized word boxes
@@ -362,6 +483,11 @@
     try {
       const wb = await getWordBoxes(num);
       if (curMainPage === num && compiled) placeHighlights(hlLayer, wb, compiled);
+      if (pulsePage === num) { // arrived via a citation link → softly pulse the matches
+        pulsePage = 0;
+        hlLayer.classList.add("hl-pulse");
+        setTimeout(() => hlLayer.classList.remove("hl-pulse"), 1400);
+      }
     } catch (e) {}
   }
   function redrawMainHighlights() { drawMainHighlights(curMainPage || pageNum); }
@@ -484,9 +610,13 @@
   }
 
   // ===================== hidden tutor chat (streaming markdown notes) ======
-  let aiThread = [];        // [{role:'user'|'assistant', content, q}]
+  let aiThread = [];        // [{role:'user'|'assistant', content, q}] — persists across asks (short memory); :new clears it
   let aiStreaming = false;
   let fastMode = false;     // :fast → text-only (no slide images) for a quick answer
+  let autoAsk = true;       // :ask → pasted exam tasks (text/screenshot) ask instantly, no extra keystroke
+  let autoRunSql = true;    // :auto → read-only SQL in answers runs by itself against the imported DB
+  let checkMode = true;     // :check → every answer is silently re-solved + cross-checked (2-of-3 on conflict)
+  let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
   let pendingFiles = [];    // pasted text/SQL files queued for the next ask {name,text,truncated}
@@ -499,6 +629,16 @@
     if (!aiPanel.hidden) closeChat();
     document.body.classList.add("viewer-only");
     qInput.blur();
+  }
+  // One-press panic: a single Esc from anywhere drops straight to the bare
+  // PDF viewer — notes, sidebar, sandbox, hover previews and toasts all go at
+  // once (no Esc-Esc-Esc chain while someone walks past).
+  function panicHide() {
+    try { if (window.SqlSandbox) SqlSandbox.close(); } catch (e) {}
+    try { hideRefPreview(); } catch (e) {}
+    hideSearch(); // also closes the notes panel if open
+    const t = document.getElementById("aiToast");
+    if (t) t.classList.remove("show");
   }
 
   function openChat() { revealSearch(false); examplesEl.hidden = true; resultsEl.hidden = true; aiPanel.hidden = false; }
@@ -554,6 +694,70 @@
     });
   }
 
+  // Heuristic: does a pasted text look like an exam task rather than a search
+  // term? Multi-line or long pastes, question marks, MC options and German
+  // task verbs all say "task" — short one-liners stay live-search.
+  function looksLikeExamQuestion(t) {
+    const s = String(t || "").trim();
+    if (s.length < 60 || s.charAt(0) === ":") return false;
+    if (/\n/.test(s)) return true;                    // multi-line paste = task text
+    if (s.length >= 200) return true;                 // very long single line
+    return /\?/.test(s) ||
+      /(^|\n)\s*[a-eA-E][).]\s/.test(s) ||            // MC options a) b) c)
+      /\b(aufgabe|welche|wahr|falsch|richtig|trifft|kreuzen|erkl(ä|ae)ren|nennen|geben sie|schreiben sie|formulieren|select)\b/i.test(s);
+  }
+
+  // One paste pipeline for the whole app (search box AND anywhere else):
+  // images/files are attached; exam-question text asks immediately (autoAsk).
+  async function handlePaste(e) {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const fromInput = e.target === qInput;
+    const imgBlobs = [], textBlobs = [], seen = new Set();
+    const consider = (f) => {
+      if (!f) return;
+      const key = (f.name || "") + ":" + f.size;     // copied files appear in both items & files
+      if (seen.has(key)) return; seen.add(key);
+      if (f.type && f.type.indexOf("image") === 0) imgBlobs.push(f);
+      else if (isTextFile(f)) textBlobs.push(f);
+    };
+    for (const it of (cd.items || [])) { if (it.kind === "file") consider(it.getAsFile()); }
+    for (const f of (cd.files || [])) consider(f);
+
+    if (!imgBlobs.length && !textBlobs.length) {
+      // plain text: a pasted exam task asks itself; anything else becomes a search
+      const txt = (cd.getData && cd.getData("text/plain")) || "";
+      if (autoAsk && looksLikeExamQuestion(txt)) { // streaming? runAsk queues it
+        e.preventDefault();
+        qInput.value = txt.trim();
+        runAsk();
+      } else if (!fromInput && txt.trim()) {
+        e.preventDefault();
+        revealSearch(true);
+        qInput.value = txt.trim().slice(0, 300);
+        onInput();
+      }
+      return; // paste into the search box falls through to normal typing/search
+    }
+
+    e.preventDefault();
+    for (const f of imgBlobs) {
+      if (pendingImages.length >= 4) break;
+      // 2400px keeps even high-DPI screenshots under Sonnet 5's 2576px vision
+      // limit without the API downscaling them — small exam text stays readable
+      try { pendingImages.push(await processImageBlob(f, 2400)); } catch (err) {}
+    }
+    for (const f of textBlobs) {
+      if (pendingFiles.length >= 4) break;
+      try { pendingFiles.push(await processTextFile(f)); } catch (err) {}
+    }
+    renderAttachments();
+    if (!fromInput && (pendingImages.length || pendingFiles.length)) revealSearch(false);
+    // a screenshot with nothing typed IS the whole question → ask instantly
+    // (if an answer is still streaming, runAsk queues it and fires it next)
+    if (autoAsk && imgBlobs.length && pendingImages.length && !qInput.value.trim()) runAsk();
+  }
+
   // Discreet attachment strip: thumbnails of queued screenshots + chips for queued
   // text/SQL files, each removable. Shown above the search box before an ask.
   function renderAttachments() {
@@ -582,11 +786,208 @@
     });
   }
 
+  // Notes persist across reloads (text only — images and slide context are not
+  // stored). An accidental F5 during the exam no longer loses the thread.
+  const THREAD_KEY = "ntThread";
+  function persistThread() {
+    try {
+      const lean = aiThread.slice(-20).map((t) => t.role === "user"
+        ? { role: "user", q: String(t.q || "").slice(0, 600) }
+        : { role: "assistant", content: String(t.content || "").slice(0, 4000), check: t.check || "" });
+      localStorage.setItem(THREAD_KEY, JSON.stringify(lean));
+    } catch (e) {}
+  }
+  function restoreThread() {
+    try {
+      const raw = localStorage.getItem(THREAD_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return;
+      aiThread = arr
+        .filter((t) => t && (t.role === "user" || t.role === "assistant"))
+        .map((t) => t.role === "user"
+          ? { role: "user", content: "", q: String(t.q || "") }
+          : { role: "assistant", content: String(t.content || ""), check: t.check || "" });
+      if (aiThread.length && aiThread[aiThread.length - 1].role === "user") aiThread.pop(); // never end on a dangling question
+    } catch (e) {}
+  }
+
+  // POST to the tutor endpoint with one silent retry when nothing has been
+  // received yet (exam-day resilience: a flaky first connection self-heals).
+  async function postQ(messages, effort) {
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const resp = await fetch("q", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider: AI_PROVIDER, messages: messages, effort: effort }),
+        });
+        if (!resp.ok || !resp.body) {
+          const e = await resp.json().catch(() => ({}));
+          throw new Error(e.error || "Request failed (HTTP " + resp.status + ")");
+        }
+        return resp;
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
+      }
+    }
+    throw lastErr || new Error("Anfrage fehlgeschlagen");
+  }
+  async function readAll(resp) {
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let acc = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      acc += dec.decode(value, { stream: true });
+    }
+    return acc;
+  }
+
+  // ===================== Gegenprüfung (silent self-verification) ============
+  // Every answer is re-solved from scratch by an independent second request
+  // (self-consistency: two agreeing independent solves are far more reliable
+  // than one). On agreement a subtle "✓✓" chip appears. On DISAGREEMENT a
+  // strict third arbiter solve decides 2-of-3 — so a wrong "correction" can't
+  // flip a right answer (the classic self-correction failure on multiple
+  // choice). If the answer contains read-only SQL and an exam DB is loaded,
+  // the checker additionally receives the REAL execution result as evidence.
+  // Runs detached: never blocks or disturbs the visible answer. :check toggles.
+  const CHECK_LABEL = {
+    checking: "· wird gegengeprüft…",
+    appeal: "· wird gegengeprüft… (Einspruch läuft)",
+    ok: "✓✓ gegengeprüft",
+    ok2: "✓ bestätigt (2 von 3)",
+    fixed: "⚠ korrigiert (2 von 3)",
+    warn: "⚠ Zweitlösung weicht ab",
+  };
+  function ensureCheckChip(el, turn, state) {
+    // terminal states (ok/ok2/fixed/warn) are written to turn.check by the
+    // callers; transient states (checking/appeal) are DOM-only
+    if (!el || !el.isConnected) return;
+    let chip = el.querySelector(".nt-check");
+    if (!state) { if (chip) chip.remove(); return; }
+    if (!chip) {
+      chip = document.createElement("span");
+      chip.className = "nt-check";
+      const bar = el.querySelector(".nt-actions");
+      if (bar) bar.appendChild(chip); else el.appendChild(chip);
+    }
+    chip.dataset.state = state;
+    chip.textContent = CHECK_LABEL[state] || "";
+  }
+  // Compact execution evidence for SQL answers (read-only, imported DB only).
+  async function sqlEvidenceFor(content) {
+    let evidence = "";
+    try {
+      if (!window.SqlSandbox || !SqlSandbox.execForCheck || !window.SqlUtil) return "";
+      const schema = await SqlSandbox.schemaText();
+      if (!schema) return "";
+      const re = /```(?:sql|mysql|sqlite)\r?\n([\s\S]*?)```/gi;
+      let m, n = 0;
+      while ((m = re.exec(content)) !== null && n < 2) {
+        const sql = m[1].trim();
+        const stmts = SqlUtil.splitStatements(sql);
+        if (!stmts.length || stmts.length > 2) continue;
+        if (!stmts.every((s) => READONLY_SQL.test(s.trim()) && !WRITE_SQL.test(s))) continue;
+        n++;
+        evidence += "\n\n--- AUSFÜHRUNGSBELEG (diese Abfrage wurde real auf der importierten DB ausgeführt) ---\n" +
+          (await SqlSandbox.execForCheck(sql));
+      }
+    } catch (e) {}
+    return evidence;
+  }
+  // Endergebnis-level normalization: two independently generated answers that
+  // are textually identical after stripping citations/markdown ARE the same
+  // result — that agreement is free (no comparison call needed).
+  function normalizeVerdictText(s) {
+    return String(s || "")
+      .replace(/\(Folie[^)]*\)/gi, "")
+      .replace(/\(allg\.?[^)]*\)/gi, "")
+      .replace(/[*_`#>~|]/g, "")
+      .replace(/\s+/g, " ")
+      .trim().toLowerCase();
+  }
+  async function crossCheckAnswer(turn, blocks, history, el, shadowPromise) {
+    ensureCheckChip(el, turn, "checking");
+    try {
+      const shadow = String((await shadowPromise) || "").trim();
+      if (!shadow || shadow.indexOf("_(Fehler") !== -1) { ensureCheckChip(elForTurn(turn, el), turn, ""); return; }
+      // 1) free agreement: normalized-identical answers confirm instantly
+      const a = normalizeVerdictText(turn.content), b = normalizeVerdictText(shadow);
+      if (a && a === b) { finishCheck(turn, el, "ok"); return; }
+      // 2) quick semantic compare of the two END RESULTS (tiny output, medium effort)
+      const cmpBlocks = blocks.concat([{ type: "text", text:
+        "\n--- LÖSUNG A ---\n" + turn.content + "\n--- LÖSUNG B ---\n" + shadow + "\n--- ENDE ---\n" +
+        "Vergleiche NUR die Endergebnisse der beiden unabhängigen Lösungen (Formulierung ist egal; bei mehreren " +
+        'Teilaufgaben müssen ALLE Teilergebnisse übereinstimmen). Antworte GENAU "GLEICH" oder GENAU "VERSCHIEDEN".' }]);
+      const cmp = String(await readAll(await postQ(history.concat([{ role: "user", content: cmpBlocks }]), "medium")) || "").trim();
+      if (/^[\s*_#>"']*gleich\b/i.test(cmp)) { finishCheck(turn, el, "ok"); return; }
+      // 3) real conflict → strict arbiter at maximum depth decides 2-of-3, with
+      // real SQL execution evidence when available; only a majority may correct
+      ensureCheckChip(elForTurn(turn, el), turn, "appeal");
+      const evidence = await sqlEvidenceFor(turn.content);
+      const adjBlocks = blocks.concat([{ type: "text", text:
+        "\n--- LÖSUNG A ---\n" + turn.content + "\n--- LÖSUNG B ---\n" + shadow + "\n--- ENDE ---" + evidence + "\n\n" +
+        "Schiedsprüfung: Zwei unabhängige Lösungen widersprechen sich im Endergebnis. Löse die Aufgabe selbst und " +
+        'entscheide streng. ERSTE Zeile deiner Antwort: genau "A" oder "B" (welches Endergebnis korrekt ist). ' +
+        'Ab der zweiten Zeile: nur bei "B" die korrekte Kurzantwort.' }]);
+      // the arbiter decides whether an answer gets corrected → maximum depth
+      const adj = String(await readAll(await postQ(history.concat([{ role: "user", content: adjBlocks }]), "xhigh")) || "").trim();
+      const firstLine = (adj.split(/\r?\n/)[0] || "").replace(/[*_#>."'`:]/g, "").trim().toUpperCase();
+      if (/^A\b/.test(firstLine) || firstLine === "A") { finishCheck(turn, el, "ok2"); return; }
+      const corr = adj.replace(/^.*(\r?\n|$)/, "").trim() || shadow;
+      applyCorrection(turn, el, corr, /^B\b/.test(firstLine) || firstLine === "B" ? "fixed" : "warn");
+    } catch (e) {
+      ensureCheckChip(elForTurn(turn, el), turn, ""); // silent — verification must never disturb the answer
+    }
+  }
+  // The thread may have re-rendered while a check ran (queued questions) —
+  // re-resolve the turn's current DOM element so the verdict still lands.
+  function elForTurn(turn, el) {
+    if (el && el.isConnected) return el;
+    const doc = aiPanel.querySelector("#ntDoc");
+    if (!doc) return null;
+    const i = aiThread.indexOf(turn); // renderThread appends exactly one div per turn
+    return i >= 0 ? (doc.children[i] || null) : null;
+  }
+  function finishCheck(turn, el, state) {
+    turn.check = state;
+    ensureCheckChip(elForTurn(turn, el), turn, state);
+    persistThread();
+  }
+  function applyCorrection(turn, el, correction, state) {
+    turn.check = state;
+    turn.content += "\n\n---\n\n**⚠ Gegenprüfung — Korrektur:**\n\n" + correction;
+    el = elForTurn(turn, el);
+    if (el) {
+      el.innerHTML = renderMarkdown(turn.content);
+      enhanceAnswer(el);
+      addAnswerActions(el, turn);
+      ensureCheckChip(el, turn, state);
+      const doc = aiPanel.querySelector("#ntDoc");
+      if (doc) doc.scrollTop = doc.scrollHeight;
+    }
+    persistThread();
+  }
+
   async function runAsk() {
     const q = qInput.value.trim();
     const imgs = pendingImages.slice();              // screenshots the user pasted
     const files = pendingFiles.slice();              // .sql/text files the user pasted
-    if ((!q && !imgs.length && !files.length) || aiStreaming || !engine) return;
+    if ((!q && !imgs.length && !files.length) || !engine) return;
+    if (aiStreaming) {
+      // rapid-fire exam flow: questions pasted while one is streaming queue up
+      // and fire automatically as soon as the current answer is done
+      askQueue.push({ q: q, imgs: imgs, files: files });
+      qInput.value = ""; clearBtn.hidden = true;
+      pendingImages = []; pendingFiles = []; renderAttachments();
+      showAiToast("⏳ eingereiht (" + askQueue.length + ")");
+      return;
+    }
     setAiBusy(true);
     const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
     let assistantTurn = null;
@@ -599,22 +1000,43 @@
       // A pasted screenshot is self-contained, so we send just the image — no slides.
       let citationSlides = [];
       let slidesText = "";
-      let visionImages = [];     // rendered images of the top slides (vision grounding)
+      let visionImages = [];     // rendered top-slide images {page, media_type, data} (vision grounding)
       if (q && !isImageAsk) {
         const res = engine.search(q, { limit: 12 });
         const pickedSlides = res.results.slice(0, 12);
         citationSlides = pickedSlides.map((r) => data.slides[r.docId]).filter(Boolean);
-        slidesText = pickedSlides.map((r) =>
-          "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") + "]\n" +
-          (((data.slides[r.docId] || {}).text) || "").slice(0, 700)
-        ).join("\n\n");
-        // Attach the top slides as IMAGES so the model can actually read diagrams /
-        // ER-models / tables the extracted text misses. :fast turns this off.
+        // Which slides go along as IMAGES: the top-ranked ones, plus any near-top
+        // slide whose extracted text is so thin its content must live in the
+        // graphics (ER diagram, table screenshot). :fast turns images off.
+        // PASTED exam tasks (long q) are self-contained — slide images only pay
+        // off when the slides genuinely match, so weak matches skip the whole
+        // render+upload+vision cost (several seconds) and strong matches send
+        // just the single best slide as grounding.
+        let visionPages = [];
         if (!fastMode && typeof pdfjsLib !== "undefined") {
-          const topPages = pickedSlides.slice(0, VISION_SLIDES).map((r) => r.page);
-          visionImages = (await Promise.all(topPages.map((pg) =>
-            renderSlideForVision(pg, 2000).catch(() => null)))).filter(Boolean);
+          const top = res.results[0];
+          const pastedTask = q.length >= 160;
+          if (pastedTask) {
+            if (top && (top.coverage || 0) >= 0.5) visionPages = [top.page];
+          } else {
+            visionPages = pickedSlides.slice(0, VISION_SLIDES).map((r) => r.page);
+            for (const r of pickedSlides.slice(VISION_SLIDES, 6)) {
+              if (visionPages.length >= VISION_MAX) break;
+              const t = ((((data.slides[r.docId] || {}).text) || "")).replace(/\s+/g, " ").trim();
+              if (t.length < THIN_TEXT) visionPages.push(r.page);
+            }
+          }
         }
+        slidesText = pickedSlides.map((r) =>
+          "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") +
+          (visionPages.indexOf(r.page) >= 0 ? " | auch als Bild beigefügt" : "") + "]\n" +
+          (((data.slides[r.docId] || {}).text) || "").slice(0, 1000)
+        ).join("\n\n");
+        visionImages = (await Promise.all(visionPages.map((pg) =>
+          renderSlideForVision(pg, VISION_WIDTH)
+            .then((im) => ({ page: pg, media_type: im.media_type, data: im.data }))
+            .catch(() => null)
+        ))).filter(Boolean);
       }
 
       // attached .sql/text files → a context block appended to the prompt
@@ -624,43 +1046,101 @@
           files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n");
       }
 
+      // imported DB schema + active dialect — sent with EVERY ask (screenshots too:
+      // a photographed SQL task still needs the real table/column names to be solvable)
+      let schemaBlock = "";
+      try {
+        if (window.SqlSandbox && SqlSandbox.schemaText) {
+          const schema = await SqlSandbox.schemaText();
+          if (schema) {
+            const dialect = (SqlSandbox.engineName && SqlSandbox.engineName()) || "SQL";
+            schemaBlock = "\n\n--- Importiertes Datenbank-Schema (Dialekt: " + dialect +
+              " — nutze GENAU diese Tabellen-/Spaltennamen) ---\n" + schema;
+          }
+        }
+      } catch (e) {}
+
       // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
       let textPart;
-      if (isImageAsk) {
+      const snipPages = Array.from(new Set(imgs.map((im) => im.page).filter(Boolean)));
+      if (isImageAsk && snipPages.length && imgs.every((im) => im.page)) {
+        // every image is a region snipped from a slide (Alt+drag) → ground the
+        // answer in the source slide's text AND pixels, and allow its citation
+        citationSlides = snipPages.map((p) => slideByPage(p)).filter(Boolean);
+        const ctx = citationSlides.map((s) =>
+          "[Folie " + s.page + " | " + (s.lecture || "") + " | " + (s.title || "") + "]\n" +
+          String(s.text || "").slice(0, 1000)).join("\n\n");
+        textPart = (q ? q + "\n\n" : "Erkläre präzise und so knapp wie möglich, was der markierte Ausschnitt zeigt und bedeutet.\n\n") +
+          "Der Ausschnitt stammt von Folie " + snipPages.join(", ") + "." +
+          (ctx ? "\n\n--- Text der Quell-Folie(n) (Kontext) ---\n" + ctx : "") +
+          filesText + schemaBlock +
+          "\n\nSchließe mit \"(Folie " + snipPages.join(", Folie ") + ")\".";
+      } else if (isImageAsk) {
         textPart = (q ? q + "\n\n" : "") +
-          "Im Bild steht die gesamte Aufgabe. Gib NUR die Lösung — direkt, vollständig und so knapp wie möglich, zum schnellen Ablesen. " +
+          "Im Bild steht die gesamte Aufgabe. Lies sie vollständig (auch Tabellen und Diagramme) und gib NUR die Lösung — " +
+          "direkt, alle Teilaufgaben, so knapp wie möglich zum schnellen Ablesen. " +
           "Wähle selbst das übersichtlichste Format passend zur Aufgabe (Markdown wird angezeigt: Stichpunkte, nummerierte Zeilen, Tabellen, ```sql-Blöcke …). " +
           "Kein Erklärtext (außer die Aufgabe verlangt ihn), kein Wiederholen der Aufgabe, keine Folien-Zitate." +
-          filesText;
+          filesText + schemaBlock;
       } else {
-        let schema = "";
-        try { if (window.SqlSandbox && SqlSandbox.schemaText) schema = await SqlSandbox.schemaText(); } catch (e) {}
         // with a file but no typed question, ask the model to solve/explain it
         const ask = q || (files.length
           ? "Beantworte die Aufgabe aus der/den angehängten Datei(en). Enthält sie keine Frage, erkläre kurz und präzise, was der SQL-Code tut."
           : "");
         textPart = ask + filesText +
           (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
-          (schema ? "\n\n--- Importiertes Datenbank-Schema (nutze GENAU diese Tabellen-/Spaltennamen für SQL) ---\n" + schema : "") +
-          (visionImages.length ? "\n\n(Die wichtigsten Folien sind zusätzlich als Bilder beigefügt — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
+          schemaBlock +
+          (visionImages.length ? "\n\n(Die wichtigsten Folien folgen als Bilder, jeweils mit ihrer Foliennummer beschriftet — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
       }
 
-      // neutral content blocks: text, then images (pasted screenshots, or rendered top slides)
+      // neutral content blocks: text, then images — each image preceded by a short
+      // label so the model knows which Folie (or screenshot) it is looking at and
+      // its citations stay precise
       const blocks = [{ type: "text", text: textPart }];
-      const attachImgs = isImageAsk ? imgs : visionImages;
-      for (const im of attachImgs) blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+      if (isImageAsk) {
+        imgs.forEach((im, i) => {
+          if (im.page) blocks.push({ type: "text", text: "Ausschnitt von Folie " + im.page + ":" });
+          else if (imgs.length > 1) blocks.push({ type: "text", text: "Screenshot " + (i + 1) + ":" });
+          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+        });
+      } else {
+        for (const im of visionImages) {
+          blocks.push({ type: "text", text: "Bild von Folie " + im.page + ":" });
+          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+        }
+      }
 
-      aiThread = [];            // no history — each question is standalone
+      // short conversational memory: re-send the last 2 completed Q/A pairs (text
+      // only, trimmed — no images, no old slide context) so follow-ups like
+      // "und warum?" resolve against the previous answer. :new clears the thread.
+      const history = [];
+      for (let i = aiThread.length - 2; i >= 0 && history.length < 4; i -= 2) {
+        const u = aiThread[i], a = aiThread[i + 1];
+        if (!u || !a || u.role !== "user" || a.role !== "assistant") break;
+        const ans = String(a.content || "").trim();
+        if (!ans || ans.lastIndexOf("_(Fehler", 0) === 0) continue;
+        const uq = (u.q || "(Screenshot-/Datei-Aufgabe)").slice(0, 500);
+        history.unshift({ role: "user", content: uq }, { role: "assistant", content: ans.slice(0, 2500) });
+      }
+
       const shownQ = q || (files.length ? files.map((f) => "📄 " + f.name).join(", ") : "");
       aiThread.push({ role: "user", content: textPart, q: shownQ, images: imgs.map((im) => im.dataUrl) });
       aiThread.push({ role: "assistant", content: "" });
+      while (aiThread.length > 20) aiThread.splice(0, 2); // keep the notes panel + memory bounded
       qInput.value = ""; clearBtn.hidden = true;
       pendingImages = []; pendingFiles = []; renderAttachments();
       openChat();
       renderThread();
 
-      // payload: a single fresh turn (text + any images), no prior conversation is sent
-      const messages = [{ role: "user", content: blocks }];
+      // payload: prior Q/A pairs (text only) + the fresh turn (text + any images)
+      const messages = history.concat([{ role: "user", content: blocks }]);
+
+      // Gegenprüfung: fire the independent shadow solve NOW, in parallel with the
+      // visible answer — its result is ready the moment the answer finishes, so
+      // the ✓✓/⚠ verdict lands seconds after the last token instead of a full
+      // second solve later
+      const wantCheck = checkMode && !fastMode;
+      const shadowPromise = wantCheck ? postQ(messages).then(readAll).catch(() => null) : null;
 
       assistantTurn = aiThread[aiThread.length - 1];
       let acc = "", pending = false;
@@ -672,15 +1152,8 @@
         const doc = aiPanel.querySelector("#ntDoc");
         if (doc) doc.scrollTop = doc.scrollHeight;
       };
-      const resp = await fetch("q", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: provider, messages }),
-      });
-      if (!resp.ok || !resp.body) {
-        const e = await resp.json().catch(() => ({}));
-        throw new Error(e.error || "Request failed (HTTP " + resp.status + ")");
-      }
+      // :fast trades reasoning depth for latency (medium effort, no images, no check)
+      const resp = await postQ(messages, fastMode ? "medium" : undefined); // one silent retry if nothing streamed yet
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       for (;;) {
@@ -693,10 +1166,24 @@
       assistantTurn.content = acc || "_(keine Antwort)_";
       try {
         if (typeof SlideSearchEngine !== "undefined" && typeof SlideSearchEngine.verifyCitations === "function") {
-          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides);
+          // pages sent as images are trusted: the model may have read content there
+          // that text extraction missed (diagrams), so don't strip those citations
+          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides, {
+            trustedPages: visionImages.map((im) => im.page).concat(imgs.map((im) => im.page).filter(Boolean)),
+          });
         }
       } catch (e) {}
-      if (streamBodyEl) { streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content); enhanceAnswer(streamBodyEl); }
+      if (streamBodyEl) {
+        streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content);
+        enhanceAnswer(streamBodyEl, true); // final render → read-only SQL may auto-run now
+        addAnswerActions(streamBodyEl, assistantTurn);
+      }
+      // Gegenprüfung: detached compare of the two independent solves (2-of-3 on conflict)
+      if (wantCheck && shadowPromise && assistantTurn.content.length > 12 &&
+          assistantTurn.content.indexOf("_(Fehler") === -1 &&
+          assistantTurn.content.indexOf("_(keine Antwort)") === -1) {
+        crossCheckAnswer(assistantTurn, blocks, history, streamBodyEl, shadowPromise);
+      }
     } catch (e) {
       if (assistantTurn) {
         assistantTurn.content = "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
@@ -706,8 +1193,17 @@
       }
     } finally {
       setAiBusy(false);
+      persistThread();
       const doc = aiPanel.querySelector("#ntDoc");
       if (doc) doc.scrollTop = doc.scrollHeight;
+      if (askQueue.length) { // fire the next queued exam question automatically
+        const nxt = askQueue.shift();
+        qInput.value = nxt.q || "";
+        pendingImages = nxt.imgs;
+        pendingFiles = nxt.files;
+        renderAttachments();
+        setTimeout(runAsk, 60);
+      }
     }
   }
 
@@ -741,10 +1237,75 @@
         a.innerHTML = turn.content ? renderMarkdown(turn.content) : '<span class="nt-caret"></span>';
         enhanceAnswer(a);
         doc.appendChild(a);
+        if (turn.check) ensureCheckChip(a, turn, turn.check); // restore ✓✓/⚠ verdicts
         streamBodyEl = a;
       }
     });
+    const lastTurn = aiThread[aiThread.length - 1];
+    if (streamBodyEl && lastTurn && lastTurn.role === "assistant" && lastTurn.content) {
+      addAnswerActions(streamBodyEl, lastTurn); // re-opened thread keeps the check/copy bar
+    }
     doc.scrollTop = doc.scrollHeight;
+  }
+
+  // Action bar under the newest answer: one-click self-verification (the tutor
+  // re-checks its own result via the thread memory) and copy-whole-answer.
+  function addAnswerActions(el, turn) {
+    if (!el || el.querySelector(".nt-actions")) return;
+    const bar = document.createElement("div");
+    bar.className = "nt-runbar nt-actions";
+    const chk = document.createElement("button");
+    chk.className = "nt-run";
+    chk.textContent = "⟳ Prüfen";
+    chk.title = "Antwort nochmals kritisch prüfen lassen";
+    chk.addEventListener("click", () => {
+      if (aiStreaming) return;
+      qInput.value = "Prüfe deine letzte Antwort kritisch Schritt für Schritt (Rechenwege, jede MC-Option einzeln, SQL gegen das Schema). " +
+        "Wenn alles stimmt: bestätige nur das Endergebnis in einer Zeile. Wenn nicht: gib die korrigierte Antwort.";
+      runAsk();
+    });
+    const cp = document.createElement("button");
+    cp.className = "nt-run nt-copy";
+    cp.textContent = "⧉ Antwort";
+    cp.title = "Ganze Antwort kopieren";
+    cp.addEventListener("click", () => copyToClipboard((turn && turn.content) || el.innerText, cp, "⧉ Antwort"));
+    bar.appendChild(chk); bar.appendChild(cp);
+    el.appendChild(bar);
+  }
+
+  // Lightweight SQL syntax coloring for rendered ```sql blocks (display only —
+  // the Run/Copy buttons still read the raw textContent). Tokenize → escape →
+  // wrap, so no model output ever reaches the DOM unescaped.
+  const SQL_KW = new Set((
+    "select from where group by having order limit offset join inner left right outer full cross natural on using as " +
+    "distinct union all any and or not in is null like between exists case when then else end " +
+    "insert into values update set delete truncate create table view index drop alter add column " +
+    "primary key foreign references constraint unique check default auto_increment asc desc " +
+    "count sum avg min max if ifnull nullif coalesce concat substring trim upper lower length round floor ceil abs mod " +
+    "now curdate curtime year month day date datetime timestamp interval " +
+    "varchar char int integer smallint bigint decimal numeric float double real text blob boolean bool enum " +
+    "commit rollback begin start transaction savepoint release grant revoke show describe explain use database schema " +
+    "with recursive over partition row_number rank dense_rank"
+  ).split(" "));
+  function highlightSql(src) {
+    const RE = /(\/\*[\s\S]*?\*\/|--[^\n]*|#[^\n]*)|('(?:[^']|'')*'|"(?:[^"]|"")*"|`[^`]*`)|(\b\d+(?:\.\d+)?\b)|([A-Za-z_][A-Za-z0-9_]*)/g;
+    let out = "", last = 0, m;
+    while ((m = RE.exec(src)) !== null) {
+      out += esc(src.slice(last, m.index));
+      if (m[1]) out += '<span class="sq-c">' + esc(m[1]) + "</span>";
+      else if (m[2]) out += '<span class="sq-s">' + esc(m[2]) + "</span>";
+      else if (m[3]) out += '<span class="sq-n">' + esc(m[3]) + "</span>";
+      else out += SQL_KW.has(m[4].toLowerCase()) ? '<span class="sq-k">' + esc(m[4]) + "</span>" : esc(m[4]);
+      last = RE.lastIndex;
+    }
+    return out + esc(src.slice(last));
+  }
+  function codeBlockHtml(buf, lang) {
+    const lc = String(lang || "").toLowerCase();
+    const cls = "nt-code" + (lc ? " lang-" + esc(lc) : "");
+    const raw = buf.join("\n");
+    const body = (lc === "sql" || lc === "mysql" || lc === "sqlite") ? highlightSql(raw) : esc(raw);
+    return '<pre class="' + cls + '"><code>' + body + "</code></pre>";
   }
 
   // minimal, safe Markdown -> HTML (escapes everything; tolerant of partial input)
@@ -773,7 +1334,7 @@
       const line = lines[i];
       if (/^```/.test(line)) {
         if (!inCode) { flushPara(); closeList(); inCode = true; codeBuf = []; codeLang = (line.match(/^```\s*([A-Za-z0-9_+-]+)/) || [])[1] || ""; }
-        else { const cls = "nt-code" + (codeLang ? " lang-" + esc(codeLang.toLowerCase()) : ""); html += '<pre class="' + cls + '"><code>' + esc(codeBuf.join("\n")) + "</code></pre>"; inCode = false; codeLang = ""; }
+        else { html += codeBlockHtml(codeBuf, codeLang); inCode = false; codeLang = ""; }
         continue;
       }
       if (inCode) { codeBuf.push(line); continue; }
@@ -801,18 +1362,82 @@
       closeList();
       para.push(line);
     }
-    if (inCode) html += '<pre class="nt-code"><code>' + esc(codeBuf.join("\n")) + "</code></pre>";
+    if (inCode) html += codeBlockHtml(codeBuf, codeLang); // unterminated fence while streaming — colored + classed live
     flushPara(); closeList();
     return html;
   }
+  // Hovering a "(Folie N)" citation shows a floating live preview of that slide
+  // (from the cached thumbnail render); clicking jumps and pulses the matches.
+  let refPrevEl = null, refPrevTimer = null, refPrevToken = 0;
+  function hideRefPreview() {
+    clearTimeout(refPrevTimer);
+    refPrevToken++;
+    if (refPrevEl) refPrevEl.classList.remove("show");
+  }
+  function showRefPreview(link, page) {
+    clearTimeout(refPrevTimer);
+    refPrevTimer = setTimeout(async () => {
+      const tok = ++refPrevToken;
+      if (!refPrevEl) {
+        refPrevEl = document.createElement("div");
+        refPrevEl.className = "ref-preview";
+        refPrevEl.innerHTML = '<canvas></canvas><div class="rp-cap"></div>';
+        document.body.appendChild(refPrevEl);
+        document.addEventListener("scroll", hideRefPreview, true); // any scroll → hide (position would go stale)
+      }
+      let r;
+      try { r = await getPageRender(page); } catch (e) { return; }
+      if (tok !== refPrevToken || !document.body.contains(link)) return;
+      const c = refPrevEl.querySelector("canvas");
+      const W = 300, scale = W / r.bitmap.width;
+      c.width = W; c.height = Math.round(r.bitmap.height * scale);
+      c.style.width = W + "px"; c.style.height = c.height + "px";
+      c.getContext("2d").drawImage(r.bitmap, 0, 0, c.width, c.height);
+      const L = pageToLecture[page];
+      refPrevEl.querySelector(".rp-cap").textContent = "Folie " + page + (L ? " · " + lectureShort(L) : "");
+      const lr = link.getBoundingClientRect();
+      const pw = W + 14, ph = c.height + 36;
+      const left = Math.min(Math.max(8, lr.left - 30), window.innerWidth - pw - 8);
+      let top = lr.top - ph - 8;
+      if (top < 8) top = Math.min(lr.bottom + 8, window.innerHeight - ph - 8);
+      refPrevEl.style.left = left + "px";
+      refPrevEl.style.top = top + "px";
+      refPrevEl.classList.add("show");
+    }, 130);
+  }
   function wireSlideRefs(container) {
     container.querySelectorAll(".nt-ref").forEach((a) => {
-      a.addEventListener("click", (e) => { e.preventDefault(); goToPage(+a.dataset.page); });
+      a.addEventListener("click", (e) => {
+        e.preventDefault();
+        hideRefPreview();
+        pulsePage = +a.dataset.page;
+        goToPage(+a.dataset.page);
+      });
+      a.addEventListener("mouseenter", () => showRefPreview(a, +a.dataset.page));
+      a.addEventListener("mouseleave", hideRefPreview);
     });
+  }
+  // Auto-run the tutor's SQL when it is provably read-only and an exam DB is
+  // loaded — the result table appears under the answer without any click.
+  // Writes NEVER auto-run (WITH … DELETE included); :auto toggles the feature.
+  const READONLY_SQL = /^(select|with|show|describe|desc|explain)\b/i;
+  const WRITE_SQL = /\b(insert|update|delete|drop|alter|create|truncate|replace|grant|revoke|attach|pragma|set)\b/i;
+  async function maybeAutoRunSql(bar, sql, btn) {
+    try {
+      if (!autoRunSql || !window.SqlSandbox || !SqlSandbox.schemaText) return;
+      const schema = await SqlSandbox.schemaText();
+      if (!schema) return; // no imported DB → nothing to run against, no error spam
+      const stmts = window.SqlUtil && SqlUtil.splitStatements ? SqlUtil.splitStatements(sql) : [sql.trim()];
+      if (!stmts.length || stmts.length > 2) return;
+      if (!stmts.every((s) => READONLY_SQL.test(s.trim()) && !WRITE_SQL.test(s))) return;
+      SqlSandbox.runInline(bar, sql, btn);
+    } catch (e) {}
   }
   // Add a "Run" button under each SQL code block the tutor writes, executing it
   // in the sandbox against the imported exam DB and showing the result inline.
-  function wireSqlRuns(container) {
+  // With autorun (final render of an answer), read-only queries execute themselves.
+  function wireSqlRuns(container, autorun) {
+    let autoRuns = 0;
     container.querySelectorAll("pre.lang-sql, pre.lang-mysql").forEach((pre) => {
       if (pre.dataset.wired) return;
       const code = pre.querySelector("code");
@@ -833,6 +1458,7 @@
       copyBtn.addEventListener("click", () => copyToClipboard(code.textContent, copyBtn, "⧉ Kopieren"));
       bar.appendChild(copyBtn);
       pre.parentNode.insertBefore(bar, pre.nextSibling);
+      if (autorun && autoRuns < 3) { autoRuns++; maybeAutoRunSql(bar, code.textContent, btn); }
     });
   }
   // copy text to the clipboard with a graceful fallback; flashes "✓ Kopiert" on the button
@@ -851,19 +1477,41 @@
       else fallback();
     } catch (e) { fallback(); }
   }
-  function enhanceAnswer(el) { if (!el) return; wireSlideRefs(el); wireSqlRuns(el); }
+  function enhanceAnswer(el, autorun) { if (!el) return; wireSlideRefs(el); wireSqlRuns(el, autorun); }
 
   // ---- stealth: typed commands in the search box (start with ":") ----------
   function handleSecretCommand(v) {
     const raw = v.slice(1).toLowerCase().trim();
-    if (raw === "ai") { toggleAiBar(); }
-    else if (raw === "new" || raw === "reset") { aiThread = []; closeChat(); showAiToast("Neue Notiz"); return; }
-    else if (raw === "close") { closeChat(); return; }
-    else if (raw === "sql" || raw === "db" || raw === "query") { if (window.SqlSandbox) window.SqlSandbox.toggle(); qInput.value = ""; onInput(); return; }
-    else if (raw === "fast" || raw === "quick") { setFastMode(true); }
-    else if (raw === "vision" || raw === "slides" || raw === "bilder") { setFastMode(false); }
-    else { showAiToast(":" + raw + " ?"); }
-    qInput.value = ""; onInput();
+    const done = () => { qInput.value = ""; onInput(); };
+    if (raw === "ai") { toggleAiBar(); done(); }
+    else if (raw === "new" || raw === "reset") { aiThread = []; persistThread(); closeChat(); showAiToast("Neue Notiz"); done(); }
+    else if (raw === "close") { closeChat(); done(); }
+    else if (raw === "notes" || raw === "notizen" || raw === "log") {
+      if (aiThread.length) { openChat(); renderThread(); } else showAiToast("Noch keine Notizen");
+      done();
+    }
+    else if (raw === "sql" || raw === "db" || raw === "query") { if (window.SqlSandbox) window.SqlSandbox.toggle(); done(); }
+    else if (raw === "fast" || raw === "quick") { setFastMode(true); done(); }
+    else if (raw === "vision" || raw === "slides" || raw === "bilder") { setFastMode(false); done(); }
+    else if (raw === "auto" || raw === "autorun") {
+      autoRunSql = !autoRunSql;
+      try { localStorage.setItem("aiAutoRun", autoRunSql ? "1" : "0"); } catch (e) {}
+      showAiToast(autoRunSql ? "SQL-Autorun an" : "SQL-Autorun aus");
+      done();
+    }
+    else if (raw === "ask" || raw === "paste" || raw === "autoask") {
+      autoAsk = !autoAsk;
+      try { localStorage.setItem("aiAutoAsk", autoAsk ? "1" : "0"); } catch (e) {}
+      showAiToast(autoAsk ? "Einfügen fragt sofort" : "Einfügen fragt nicht automatisch");
+      done();
+    }
+    else if (raw === "check" || raw === "pruefen" || raw === "prüfen") {
+      checkMode = !checkMode;
+      try { localStorage.setItem("aiCheck", checkMode ? "1" : "0"); } catch (e) {}
+      showAiToast(checkMode ? "Gegenprüfung an (✓✓)" : "Gegenprüfung aus");
+      done();
+    }
+    else { showAiToast(":ai  :new  :notes  :sql  :fast  :vision  :auto  :ask  :check"); done(); }
   }
   function setFastMode(on) {
     fastMode = !!on;
@@ -891,9 +1539,7 @@
     qInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault(); e.stopPropagation();
-        if (!aiPanel.hidden) { closeChat(); return; }       // close notes
-        if (qInput.value) { qInput.value = ""; onInput(); return; } // clear search
-        hideSearch();
+        panicHide(); // one press → bare viewer (typed text stays for later)
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
         if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :sql, :fast, :vision
@@ -903,33 +1549,20 @@
     });
     clearBtn.addEventListener("click", () => { qInput.value = ""; onInput(); qInput.focus(); });
     askAiBtn.addEventListener("click", runAsk);
-    // paste a screenshot OR a copied file (e.g. a .sql script) into the search box →
-    // queue it as context for the next ask. Images become vision input; text/SQL
-    // files become a context block. Plain-text pastes fall through to normal search.
-    qInput.addEventListener("paste", async (e) => {
-      const cd = e.clipboardData;
-      if (!cd) return;
-      const imgBlobs = [], textBlobs = [], seen = new Set();
-      const consider = (f) => {
-        if (!f) return;
-        const key = (f.name || "") + ":" + f.size;     // copied files appear in both items & files
-        if (seen.has(key)) return; seen.add(key);
-        if (f.type && f.type.indexOf("image") === 0) imgBlobs.push(f);
-        else if (isTextFile(f)) textBlobs.push(f);
-      };
-      for (const it of (cd.items || [])) { if (it.kind === "file") consider(it.getAsFile()); }
-      for (const f of (cd.files || [])) consider(f);
-      if (!imgBlobs.length && !textBlobs.length) return;  // plain text paste → let it through
-      e.preventDefault();
-      for (const f of imgBlobs) {
-        if (pendingImages.length >= 4) break;
-        try { pendingImages.push(await processImageBlob(f, 2000)); } catch (err) {}
-      }
-      for (const f of textBlobs) {
-        if (pendingFiles.length >= 4) break;
-        try { pendingFiles.push(await processTextFile(f)); } catch (err) {}
-      }
-      renderAttachments();
+    // PASTE = ASK. The main exam flow is pasting a task — as text or as a
+    // screenshot — so pasting ANYWHERE in the app goes straight to the tutor:
+    //   · exam-question-looking text  → asks instantly (no Ctrl+Enter needed)
+    //   · screenshot + empty input    → asks instantly
+    //   · screenshot + typed text     → attaches (Enter sends, as before)
+    //   · .sql/text files             → attach as context chips
+    //   · short plain text            → normal live search
+    // :ask toggles the instant behavior. The SQL editor keeps its own paste.
+    qInput.addEventListener("paste", handlePaste);
+    document.addEventListener("paste", (e) => {
+      const t = e.target;
+      if (t === qInput) return;                                           // qInput registers its own handler
+      if (t && (t.tagName === "TEXTAREA" || t.tagName === "INPUT")) return; // e.g. the sandbox SQL editor
+      handlePaste(e);
     });
     examplesEl.querySelectorAll(".chip").forEach((chip) => {
       chip.addEventListener("click", () => { qInput.value = chip.textContent; clearBtn.hidden = false; runSearch(); qInput.focus(); });
@@ -941,11 +1574,30 @@
     pageInput.addEventListener("keydown", (e) => { if (e.key === "Enter") goToPage(parseInt(pageInput.value, 10) || 1); });
     lectureSelect.addEventListener("change", () => { const v = parseInt(lectureSelect.value, 10); if (v) goToPage(v); });
 
-    zoomInBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) * 1.2; renderMain(pageNum); });
-    zoomOutBtn.addEventListener("click", () => { manualZoom = true; mainScale = (mainScale || 1) / 1.2; renderMain(pageNum); });
+    const centerZoom = (f) => { const r = canvasScroll.getBoundingClientRect(); zoomAt(f, r.left + r.width / 2, r.top + r.height / 2); };
+    zoomInBtn.addEventListener("click", () => centerZoom(1.2));
+    zoomOutBtn.addEventListener("click", () => centerZoom(1 / 1.2));
     fitBtn.addEventListener("click", () => { manualZoom = false; renderMain(pageNum); });
+    // Ctrl+wheel (and trackpad pinch) zooms the slide, anchored at the cursor
+    canvasScroll.addEventListener("wheel", (e) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
+    }, { passive: false });
+    wireSnip();
+    const snipBtn = $("snipBtn");
+    if (snipBtn) snipBtn.addEventListener("click", () => setSnipArm(!snipArm));
     const sqlBtn = $("sqlBtn");
     if (sqlBtn) sqlBtn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.toggle(); });
+    // sandbox → tutor bridge: a failed query offers one-click auto-correction;
+    // the corrected answer streams into the notes (and auto-runs if read-only)
+    document.addEventListener("sqlfix", (e) => {
+      const d = (e && e.detail) || {};
+      if (!d.sql || aiStreaming) return;
+      qInput.value = "Diese SQL schlägt auf der importierten Datenbank fehl — korrigiere sie. Gib NUR die korrigierte, lauffähige Abfrage.\n```sql\n" +
+        d.sql + "\n```\nFehlermeldung: " + (d.error || "");
+      runAsk();
+    });
     let resizeTimer = null;
     window.addEventListener("resize", () => {
       clearTimeout(resizeTimer);
@@ -953,11 +1605,12 @@
     });
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && !aiPanel.hidden) { closeChat(); return; }
+      if (e.key === "Escape" && snipArm) { e.preventDefault(); setSnipArm(false); return; }
       const t = e.target;
       const typing = t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA");
+      // the sandbox editor handles its own Esc (closes the drawer); everything else panics
+      if (e.key === "Escape" && !typing) { e.preventDefault(); panicHide(); return; }
       if (e.key === "/" && !typing) { e.preventDefault(); revealSearch(true); } // reveal search
-      else if (e.key === "Escape" && !typing && !document.body.classList.contains("viewer-only")) { e.preventDefault(); hideSearch(); }
       else if (!typing && e.key === "ArrowLeft") { e.preventDefault(); goToPage(pageNum - 1); }
       else if (!typing && e.key === "ArrowRight") { e.preventDefault(); goToPage(pageNum + 1); }
     });

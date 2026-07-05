@@ -133,6 +133,17 @@ vcase("missing page stripped", "Etwas erfundenes (Folie 99999)", "Etwas erfunden
 const sOther = data.slides[0];
 vcase("unsupported claim stripped", "Quantenverschränkung von Tupeln (Folie " + sOther.page + ")", "Quantenverschränkung von Tupeln");
 
+// 3b. same unsupported claim, but the page was sent to the model as an IMAGE
+// (opts.trustedPages) -> kept: it may cite diagram content extraction missed
+{
+  const inp = "Quantenverschränkung von Tupeln (Folie " + sOther.page + ")";
+  const out = SlideSearchEngine.verifyCitations(inp, data.slides, { trustedPages: [sOther.page] });
+  const ok = out === inp;
+  if (ok) vpass++; else vfail++;
+  console.log(`${ok ? "PASS" : "FAIL"}  trusted image citation kept`);
+  if (!ok) { console.log("  out: " + JSON.stringify(out)); console.log("  exp: " + JSON.stringify(inp)); }
+}
+
 // 4. multiple citations, mixed -> only bad one stripped
 const sReal2 = data.slides[1] || data.slides[0];
 vcase("mixed citations", "Datenbanken (Folie " + sReal.page + ", Folie 99999)", "Datenbanken (Folie " + sReal.page + ")");

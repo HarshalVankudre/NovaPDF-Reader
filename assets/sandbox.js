@@ -159,6 +159,11 @@
     } catch (e) {}
     return out;
   }
+  // Human-readable name of the active engine — the tutor includes it as the SQL
+  // dialect next to the schema, so generated SQL matches what will actually run.
+  function engineName() {
+    return engine === "mysql" ? "MySQL" : (engine === "sqlite" ? "SQLite" : "");
+  }
   async function schemaText() {
     if (!booted) return "";
     if (schemaCache != null) return schemaCache;
@@ -206,6 +211,19 @@
   }
   function showResult(html) { if (resultsEl) resultsEl.innerHTML = html; }
   function errHtml(msg) { return '<div class="sbx-err">' + esc(msg) + "</div>"; }
+  // One-click repair: a failed statement is handed to the tutor ("Notizen"),
+  // which answers with a corrected query — read-only results even run themselves.
+  function fixButton(sql, message) {
+    const b = document.createElement("button");
+    b.className = "sbx-btn sbx-ghost sbx-fix";
+    b.textContent = "⟲ Automatisch korrigieren";
+    b.title = "Fehler + SQL an die Notizen geben und korrigieren lassen";
+    b.addEventListener("click", () => {
+      close();
+      document.dispatchEvent(new CustomEvent("sqlfix", { detail: { sql: sql, error: message } }));
+    });
+    return b;
+  }
 
   function updateEngineBadge() {
     if (!engineEl) return;
@@ -322,8 +340,28 @@
       updateEngineBadge();
       showResult(setTableHtml(sets));
     } catch (e) {
-      showResult(errHtml((e && e.message) || "Abfrage fehlgeschlagen"));
+      const msg = (e && e.message) || "Abfrage fehlgeschlagen";
+      showResult(errHtml(msg));
+      if (resultsEl) resultsEl.appendChild(fixButton(sql, msg));
     } finally { busy(false); }
+  }
+
+  // Compact, silent execution used as EVIDENCE by the tutor's Gegenprüfung —
+  // the checker sees the real result (or the real error) of the answer's query.
+  // The caller gates on read-only statements; output is capped small.
+  async function execForCheck(sql) {
+    try {
+      const sets = await runSql(sql);
+      return (sets || []).map((s) => {
+        const cols = (s.columns || []).join(" | ");
+        const rows = (s.rows || []).slice(0, 6)
+          .map((r) => r.map((c) => (c == null ? "NULL" : String(c))).join(" | ")).join("\n");
+        const total = s.rowCount != null ? s.rowCount : (s.rows || []).length;
+        return cols + "\n" + rows + ((s.rows || []).length > 6 ? "\n…" : "") + "\n(" + total + " Zeile(n))";
+      }).join("\n\n").slice(0, 800) || "(leeres Ergebnis)";
+    } catch (e) {
+      return "FEHLER bei Ausführung: " + ((e && e.message) || "unbekannt");
+    }
   }
 
   // Run SQL from an AI answer and render the result right under its code block.
@@ -339,7 +377,9 @@
       const sets = await runSql(sql);
       out.innerHTML = setTableHtml(sets);
     } catch (e) {
-      out.innerHTML = errHtml((e && e.message) || "Fehler");
+      const msg = (e && e.message) || "Fehler";
+      out.innerHTML = errHtml(msg);
+      out.appendChild(fixButton(sql, msg));
     } finally { if (btn) btn.disabled = false; }
   }
 
@@ -363,5 +403,5 @@
   function isOpen() { return !!(panel && !panel.hidden); }
   function toggle() { isOpen() ? close() : open(); }
 
-  window.SqlSandbox = { open, close, toggle, isOpen, runInline, importFiles, schemaText };
+  window.SqlSandbox = { open, close, toggle, isOpen, runInline, importFiles, schemaText, engineName, execForCheck };
 })();

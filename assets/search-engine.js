@@ -521,6 +521,9 @@
   // Verify "(Folie N)" citations in a model answer against the slide texts.
   // A citation is kept only if page N exists in `slides` AND at least one
   // content token of the claim sentence it attaches to appears on that slide.
+  // Exception: pages in opts.trustedPages are always kept when they exist in
+  // `slides` — those were sent to the model as IMAGES, so it may legitimately
+  // cite diagram content the text extraction never saw.
   // Unsupported citations are silently removed; the claim text is preserved.
   // Best-effort: on any error returns the original answer unchanged.
   function slideTextForPage(slides, page) {
@@ -537,10 +540,13 @@
     const sent = answer.slice(sentStart, citeStart);
     return contentTokens(sent).filter((t) => t && t.length >= 2);
   }
-  function verifyCitations(answerText, slides) {
+  function verifyCitations(answerText, slides, opts) {
     try {
       if (typeof answerText !== "string" || !answerText) return answerText == null ? "" : String(answerText);
       if (!Array.isArray(slides)) return answerText;
+      const trusted = new Set(
+        opts && Array.isArray(opts.trustedPages) ? opts.trustedPages.map(Number) : []
+      );
       const PAGE_REF = "(?:Folien?|Slides?|S\\.?)";
       const CITE = new RegExp(
         "\\(?\\s*" + PAGE_REF + "\\s*(\\d+(?:\\s*(?:[,;/&\\u2013-]|und|and|bis|to)\\s*(?:" + PAGE_REF + "\\s*)?\\d+)*)\\s*\\)?",
@@ -558,6 +564,7 @@
         const supportedNums = nums.filter((n) => {
           const txt = slideTextForPage(slides, n);
           if (txt == null) return false;            // missing page -> unsupported
+          if (trusted.has(n)) return true;           // sent as an image -> model could read what extraction missed
           if (!claimToks.length) return false;       // nothing to anchor -> unsupported
           const slideToks = new Set(contentTokens(txt));
           return claimToks.some((t) => slideToks.has(t));

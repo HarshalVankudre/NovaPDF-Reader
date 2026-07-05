@@ -5,7 +5,8 @@
  * Import accepts a mysqldump / plain SQL script, or CSV-per-table. The AI's
  * generated SQL gets a Run button that executes here against the imported data.
  *
- * Exposes window.SqlSandbox: { open, close, toggle, isOpen, runInline }.
+ * Exposes window.SqlSandbox: { open, close, toggle, isOpen, runInline,
+ *   importFiles, importPasted, schemaText, engineName, execForCheck }.
  */
 (function () {
   "use strict";
@@ -298,19 +299,39 @@
     if (on && label) showResult('<div class="sbx-empty">' + esc(label) + "</div>");
   }
 
+  function renderImportResult(r) {
+    const tabs = (r && r.tables) || [];
+    const list = tabs.length ? tabs.map((t) => "<code>" + esc(t.name) + "</code> <span class='sbx-dim'>(" + (t.rows || 0) + ")</span>").join(" · ") : "(keine Tabellen erkannt)";
+    const label = r && r.snapshot ? "Snapshot geladen — " + tabs.length + " Tabellen" : "Import ok — " + (r && r.engine === "sqlite" ? "SQLite" : "MySQL");
+    showResult('<div class="sbx-ok">' + label + "</div><div class='sbx-tablelist'>" + list + "</div>");
+    if (tabs.length && editorEl && !editorEl.value.trim()) editorEl.value = "SELECT * FROM " + tabs[0].name + " LIMIT 50;";
+  }
   async function doImport(fn) {
     build(); busy(true, "Importiere…");
     try {
       const r = await fn();
       await ensureEngine(true); // refresh table list/badge
       updateEngineBadge();
-      const tabs = (r && r.tables) || [];
-      const list = tabs.length ? tabs.map((t) => "<code>" + esc(t.name) + "</code> <span class='sbx-dim'>(" + (t.rows || 0) + ")</span>").join(" · ") : "(keine Tabellen erkannt)";
-      const label = r && r.snapshot ? "Snapshot geladen — " + tabs.length + " Tabellen" : "Import ok — " + (r && r.engine === "sqlite" ? "SQLite" : "MySQL");
-      showResult('<div class="sbx-ok">' + label + "</div><div class='sbx-tablelist'>" + list + "</div>");
-      if (tabs.length && editorEl && !editorEl.value.trim()) editorEl.value = "SELECT * FROM " + tabs[0].name + " LIMIT 50;";
+      renderImportResult(r);
     } catch (e) {
       showResult(errHtml((e && e.message) || "Import fehlgeschlagen"));
+    } finally { busy(false); }
+  }
+  // Import initiated OUTSIDE the drawer (a .db/.sqlite file pasted into the
+  // search UI). Same flow as doImport, but the result/error propagates to the
+  // caller so it can toast — while the drawer (open or not) still shows the
+  // imported state exactly as if the file had been dropped onto it.
+  async function importPasted(files) {
+    build(); busy(true, "Importiere…");
+    try {
+      const r = await importFiles(files);
+      await ensureEngine(true);
+      updateEngineBadge();
+      renderImportResult(r);
+      return r;
+    } catch (e) {
+      showResult(errHtml((e && e.message) || "Import fehlgeschlagen"));
+      throw e;
     } finally { busy(false); }
   }
   function importFromEditor() {
@@ -403,5 +424,5 @@
   function isOpen() { return !!(panel && !panel.hidden); }
   function toggle() { isOpen() ? close() : open(); }
 
-  window.SqlSandbox = { open, close, toggle, isOpen, runInline, importFiles, schemaText, engineName, execForCheck };
+  window.SqlSandbox = { open, close, toggle, isOpen, runInline, importFiles, importPasted, schemaText, engineName, execForCheck };
 })();

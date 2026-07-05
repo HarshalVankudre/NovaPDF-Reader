@@ -42,6 +42,11 @@ assert.match(app, /const WRITE_SQL = /, "auto-run must additionally blacklist wr
 assert.match(app, /addEventListener\("sqlfix"/, "the app should listen for the sandbox fix event");
 const sandbox = fs.readFileSync(path.join(ROOT, "assets", "sandbox.js"), "utf8");
 assert.match(sandbox, /CustomEvent\("sqlfix"/, "a failed sandbox query should offer one-click repair");
+// a pasted binary SQLite file (.db/.sqlite) imports straight into the sandbox —
+// header-sniffed (never by extension), never attached as a chip, never an ask
+assert.match(app, /async function isSqliteFile\(/, "pasted binaries should be sniffed for the SQLite magic header");
+assert.match(app, /SqlSandbox\.importPasted/, "a pasted .db should import into the SQL sandbox");
+assert.match(sandbox, /importFiles, importPasted/, "the sandbox should export the paste-import entry point");
 // viewer magic: region snip, citation hover previews, cursor-anchored zoom
 assert.match(app, /async function snipRegion\(/, "Alt+drag region snip should exist");
 // the toolbar carries no ✂/SQL buttons — snip is Alt+drag only, the sandbox opens via :sql

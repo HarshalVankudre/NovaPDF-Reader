@@ -679,6 +679,17 @@
       r.readAsText(file);
     });
   }
+  // A pasted binary SQLite file (.db/.sqlite/…) — recognized by the 16-byte
+  // magic header, not the extension (same check as the sandbox importer).
+  async function isSqliteFile(f) {
+    try {
+      const head = new Uint8Array(await f.slice(0, 16).arrayBuffer());
+      if (head.length < 16) return false;
+      const MAGIC = "SQLite format 3";
+      for (let i = 0; i < 15; i++) if (head[i] !== MAGIC.charCodeAt(i)) return false;
+      return true;
+    } catch (e) { return false; }
+  }
 
   // One paste pipeline for the whole app (search box AND anywhere else):
   // images/files attach as chips, text goes to live search. Pasting can NEVER
@@ -687,18 +698,19 @@
     const cd = e.clipboardData;
     if (!cd) return;
     const fromInput = e.target === qInput;
-    const imgBlobs = [], textBlobs = [], seen = new Set();
+    const imgBlobs = [], textBlobs = [], dbCandidates = [], seen = new Set();
     const consider = (f) => {
       if (!f) return;
       const key = (f.name || "") + ":" + f.size;     // copied files appear in both items & files
       if (seen.has(key)) return; seen.add(key);
       if (f.type && f.type.indexOf("image") === 0) imgBlobs.push(f);
       else if (isTextFile(f)) textBlobs.push(f);
+      else dbCandidates.push(f);                     // maybe a SQLite .db — header-sniffed below
     };
     for (const it of (cd.items || [])) { if (it.kind === "file") consider(it.getAsFile()); }
     for (const f of (cd.files || [])) consider(f);
 
-    if (!imgBlobs.length && !textBlobs.length) {
+    if (!imgBlobs.length && !textBlobs.length && !dbCandidates.length) {
       // plain text is only ever a search — never a question to the tutor
       const txt = (cd.getData && cd.getData("text/plain")) || "";
       if (!fromInput && txt.trim()) {
@@ -720,6 +732,22 @@
     for (const f of textBlobs) {
       if (pendingFiles.length >= 4) break;
       try { pendingFiles.push(await processTextFile(f)); } catch (err) {}
+    }
+    // A pasted SQLite DB imports straight into the sandbox — no chip, no ask.
+    // The imported schema + dialect already ride along with every tutor ask,
+    // so from here on generated SQL is grounded in (and auto-runs against) it.
+    for (const f of dbCandidates) {
+      if (!(await isSqliteFile(f))) continue;        // other binary files stay ignored
+      if (!(window.SqlSandbox && window.SqlSandbox.importPasted)) break;
+      const label = f.name || "Datenbank";
+      showAiToast("🗄 Importiere " + label + "…");
+      try {
+        const r = await window.SqlSandbox.importPasted([f]);
+        const n = (r && r.tables && r.tables.length) || 0;
+        showAiToast("🗄 " + label + " geladen — " + n + " Tabelle(n) · Schema geht bei jeder Frage mit (:sql zum Abfragen)");
+      } catch (err) {
+        showAiToast("DB-Import fehlgeschlagen: " + ((err && err.message) || "unbekannt"));
+      }
     }
     renderAttachments();
     if (!fromInput && (pendingImages.length || pendingFiles.length)) revealSearch(false);

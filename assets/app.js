@@ -107,7 +107,7 @@
     try { autoRunSql = localStorage.getItem("aiAutoRun") !== "0"; } catch (e) {} // read-only SQL auto-runs by default
     try { autoAsk = localStorage.getItem("aiAutoAsk") !== "0"; } catch (e) {}    // paste-to-ask on by default
     try { checkMode = localStorage.getItem("aiCheck") !== "0"; } catch (e) {}    // Gegenprüfung on by default
-    restoreThread(); // notes survive a reload (text only); they reappear on the next ask or :notes
+    restoreThread(); // one-shot mode: purges any thread an older build left in localStorage
 
     document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
 
@@ -786,30 +786,15 @@
     });
   }
 
-  // Notes persist across reloads (text only — images and slide context are not
-  // stored). An accidental F5 during the exam no longer loses the thread.
+  // ONE-SHOT mode: notes are never stored. persistThread actively deletes any
+  // previously saved thread (cleans up storage left by older builds too), and a
+  // reload starts blank — nothing about past questions survives in localStorage.
   const THREAD_KEY = "ntThread";
   function persistThread() {
-    try {
-      const lean = aiThread.slice(-20).map((t) => t.role === "user"
-        ? { role: "user", q: String(t.q || "").slice(0, 600) }
-        : { role: "assistant", content: String(t.content || "").slice(0, 4000), check: t.check || "" });
-      localStorage.setItem(THREAD_KEY, JSON.stringify(lean));
-    } catch (e) {}
+    try { localStorage.removeItem(THREAD_KEY); } catch (e) {}
   }
   function restoreThread() {
-    try {
-      const raw = localStorage.getItem(THREAD_KEY);
-      if (!raw) return;
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return;
-      aiThread = arr
-        .filter((t) => t && (t.role === "user" || t.role === "assistant"))
-        .map((t) => t.role === "user"
-          ? { role: "user", content: "", q: String(t.q || "") }
-          : { role: "assistant", content: String(t.content || ""), check: t.check || "" });
-      if (aiThread.length && aiThread[aiThread.length - 1].role === "user") aiThread.pop(); // never end on a dangling question
-    } catch (e) {}
+    try { localStorage.removeItem(THREAD_KEY); } catch (e) {}
   }
 
   // POST to the tutor endpoint with one silent retry when nothing has been
@@ -911,7 +896,7 @@
       .replace(/\s+/g, " ")
       .trim().toLowerCase();
   }
-  async function crossCheckAnswer(turn, blocks, history, el, shadowPromise) {
+  async function crossCheckAnswer(turn, blocks, el, shadowPromise) {
     ensureCheckChip(el, turn, "checking");
     try {
       const shadow = String((await shadowPromise) || "").trim();
@@ -924,7 +909,7 @@
         "\n--- LÖSUNG A ---\n" + turn.content + "\n--- LÖSUNG B ---\n" + shadow + "\n--- ENDE ---\n" +
         "Vergleiche NUR die Endergebnisse der beiden unabhängigen Lösungen (Formulierung ist egal; bei mehreren " +
         'Teilaufgaben müssen ALLE Teilergebnisse übereinstimmen). Antworte GENAU "GLEICH" oder GENAU "VERSCHIEDEN".' }]);
-      const cmp = String(await readAll(await postQ(history.concat([{ role: "user", content: cmpBlocks }]), "medium")) || "").trim();
+      const cmp = String(await readAll(await postQ([{ role: "user", content: cmpBlocks }], "medium")) || "").trim();
       if (/^[\s*_#>"']*gleich\b/i.test(cmp)) { finishCheck(turn, el, "ok"); return; }
       // 3) real conflict → strict arbiter at maximum depth decides 2-of-3, with
       // real SQL execution evidence when available; only a majority may correct
@@ -936,7 +921,7 @@
         'entscheide streng. ERSTE Zeile deiner Antwort: genau "A" oder "B" (welches Endergebnis korrekt ist). ' +
         'Ab der zweiten Zeile: nur bei "B" die korrekte Kurzantwort.' }]);
       // the arbiter decides whether an answer gets corrected → maximum depth
-      const adj = String(await readAll(await postQ(history.concat([{ role: "user", content: adjBlocks }]), "xhigh")) || "").trim();
+      const adj = String(await readAll(await postQ([{ role: "user", content: adjBlocks }], "xhigh")) || "").trim();
       const firstLine = (adj.split(/\r?\n/)[0] || "").replace(/[*_#>."'`:]/g, "").trim().toUpperCase();
       if (/^A\b/.test(firstLine) || firstLine === "A") { finishCheck(turn, el, "ok2"); return; }
       const corr = adj.replace(/^.*(\r?\n|$)/, "").trim() || shadow;
@@ -1110,30 +1095,21 @@
         }
       }
 
-      // short conversational memory: re-send the last 2 completed Q/A pairs (text
-      // only, trimmed — no images, no old slide context) so follow-ups like
-      // "und warum?" resolve against the previous answer. :new clears the thread.
-      const history = [];
-      for (let i = aiThread.length - 2; i >= 0 && history.length < 4; i -= 2) {
-        const u = aiThread[i], a = aiThread[i + 1];
-        if (!u || !a || u.role !== "user" || a.role !== "assistant") break;
-        const ans = String(a.content || "").trim();
-        if (!ans || ans.lastIndexOf("_(Fehler", 0) === 0) continue;
-        const uq = (u.q || "(Screenshot-/Datei-Aufgabe)").slice(0, 500);
-        history.unshift({ role: "user", content: uq }, { role: "assistant", content: ans.slice(0, 2500) });
-      }
-
+      // ONE-SHOT mode: there is no conversation. Every question stands alone —
+      // no prior Q/A pairs are sent to the model, and asking wipes the previous
+      // exchange from the panel and from memory (a late Gegenprüfung verdict for
+      // a wiped answer is dropped silently by elForTurn).
       const shownQ = q || (files.length ? files.map((f) => "📄 " + f.name).join(", ") : "");
+      aiThread = [];
       aiThread.push({ role: "user", content: textPart, q: shownQ, images: imgs.map((im) => im.dataUrl) });
       aiThread.push({ role: "assistant", content: "" });
-      while (aiThread.length > 20) aiThread.splice(0, 2); // keep the notes panel + memory bounded
       qInput.value = ""; clearBtn.hidden = true;
       pendingImages = []; pendingFiles = []; renderAttachments();
       openChat();
       renderThread();
 
-      // payload: prior Q/A pairs (text only) + the fresh turn (text + any images)
-      const messages = history.concat([{ role: "user", content: blocks }]);
+      // payload: exactly one user turn (text + any images) — never any history
+      const messages = [{ role: "user", content: blocks }];
 
       // Gegenprüfung: fire the independent shadow solve NOW, in parallel with the
       // visible answer — its result is ready the moment the answer finishes, so
@@ -1182,7 +1158,7 @@
       if (wantCheck && shadowPromise && assistantTurn.content.length > 12 &&
           assistantTurn.content.indexOf("_(Fehler") === -1 &&
           assistantTurn.content.indexOf("_(keine Antwort)") === -1) {
-        crossCheckAnswer(assistantTurn, blocks, history, streamBodyEl, shadowPromise);
+        crossCheckAnswer(assistantTurn, blocks, streamBodyEl, shadowPromise);
       }
     } catch (e) {
       if (assistantTurn) {

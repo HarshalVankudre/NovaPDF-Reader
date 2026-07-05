@@ -22,9 +22,11 @@ assert.match(app, /let fastMode = false;/);
 assert.match(app, /"Bild von Folie " \+ im\.page/, "vision images should be labeled with their Folie number");
 // generated ```sql blocks are syntax-colored via a tokenize→escape→wrap pass
 assert.match(app, /function highlightSql\(/, "SQL code blocks in answers should be syntax-colored");
-// short conversational memory: prior Q/A pairs precede the fresh turn
-assert.match(app, /const messages = history\.concat\(\[\{ role: "user", content: blocks \}\]\);/,
-  "follow-up questions should carry the recent thread as history");
+// ONE-SHOT: every ask sends exactly one user turn — no conversational memory,
+// and asking wipes the previous exchange from panel + memory
+assert.match(app, /const messages = \[\{ role: "user", content: blocks \}\];/,
+  "each question must be sent without any thread history");
+assert.doesNotMatch(app, /history\.concat/, "no request may carry prior Q/A pairs");
 
 // paste = ask: exam-question-looking pastes (text or screenshot) ask instantly
 assert.match(app, /function looksLikeExamQuestion\(/, "pasted exam tasks should be detected");
@@ -41,8 +43,9 @@ assert.match(app, /async function snipRegion\(/, "Alt+drag region snip should ex
 assert.match(html, /id="snipBtn"/, "the ✂ toolbar button should exist");
 assert.match(app, /function showRefPreview\(/, "citation hover previews should exist");
 assert.match(app, /function zoomAt\(/, "cursor-anchored zoom should exist");
-// notes survive a reload (text-only persistence)
-assert.match(app, /function persistThread\(/, "the thread should persist across reloads");
+// ONE-SHOT: nothing persists — persistThread actively removes any stored thread
+assert.match(app, /localStorage\.removeItem\(THREAD_KEY\)/, "any stored thread must be actively deleted");
+assert.doesNotMatch(app, /localStorage\.setItem\(THREAD_KEY/, "the thread must never be written to localStorage");
 
 // Gegenprüfung: an independent shadow solve runs IN PARALLEL with the visible
 // answer; identical results confirm for free, a quick compare handles phrasing
@@ -63,7 +66,7 @@ assert.match(app, /const pastedTask = q\.length >= 160;/, "pasted tasks should s
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");
 assert.match(app, /askQueue\.shift\(\)/, "questions pasted while streaming should queue and fire automatically");
 // per-request effort routing: arbiter deepest, :fast snappier, server whitelists
-assert.match(app, /postQ\(history\.concat\(\[\{ role: "user", content: adjBlocks \}\]\), "xhigh"\)/,
+assert.match(app, /postQ\(\[\{ role: "user", content: adjBlocks \}\], "xhigh"\)/,
   "the arbiter should run at maximum reasoning depth");
 const serve = fs.readFileSync(path.join(ROOT, "serve.js"), "utf8");
 assert.match(serve, /function normalizeEffort\(/, "the server should whitelist client effort overrides");

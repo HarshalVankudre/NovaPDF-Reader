@@ -8,10 +8,10 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const AI_PROVIDER = "opus";              // the only model: Anthropic Claude Opus 4.8 (text + high-res vision)
+  const AI_PROVIDER = "opus";              // provider id (historical name) — the model behind it is Claude Fable 5 (text + high-res vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
   const VISION_MAX = 4;    // cap incl. extra diagram-heavy slides pulled from ranks 4-6
-  const VISION_WIDTH = 2200; // vision render width — within Opus 4.8's 2576px high-res limit, so no API-side downscale
+  const VISION_WIDTH = 2200; // vision render width — within Fable 5's 2576px high-res limit, so no API-side downscale
   const THIN_TEXT = 180;   // slides with less extracted text than this are likely pure diagrams (content lives in the image)
 
   const $ = (id) => document.getElementById(id);
@@ -205,7 +205,7 @@
 
   // Render a slide to a JPEG data payload for the vision model. Rendered fresh at
   // a higher resolution than the thumbnail so diagrams/ER-models/SQL stay legible.
-  // Opus 4.8 accepts up to 2576px on the long edge without server-side downscaling,
+  // Fable 5 accepts up to 2576px on the long edge without server-side downscaling,
   // so everything rendered at VISION_WIDTH reaches the model pixel-for-pixel.
   async function renderSlideForVision(globalPage, width) {
     const L = pageToLecture[globalPage];
@@ -713,7 +713,7 @@
     e.preventDefault();
     for (const f of imgBlobs) {
       if (pendingImages.length >= 4) break;
-      // 2400px keeps even high-DPI screenshots under Opus 4.8's 2576px vision
+      // 2400px keeps even high-DPI screenshots under Fable 5's 2576px vision
       // limit without the API downscaling them — small exam text stays readable
       try { pendingImages.push(await processImageBlob(f, 2400)); } catch (err) {}
     }
@@ -946,7 +946,7 @@
     let assistantTurn = null;
 
     try {
-      // The only model is Claude Opus 4.8 (multimodal: text + screenshots).
+      // The only model is Claude Fable 5 (multimodal: text + screenshots).
       const provider = AI_PROVIDER;
 
       // BM25 slide text is for TEXT questions only.

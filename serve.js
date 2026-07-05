@@ -173,7 +173,9 @@ async function askAnthropic(p, key, system, user) {
   const client = new Anthropic({ apiKey: key });
   const msg = await client.messages.create({
     model: p.model,
-    max_tokens: 1024,
+    // Fable 5 always thinks and thinking counts toward max_tokens — 1024 could
+    // be eaten by reasoning alone, truncating the visible JSON answer.
+    max_tokens: 4096,
     system,
     messages: [{ role: "user", content: user }],
   });
@@ -218,9 +220,10 @@ async function askLLM(question, candidates) {
 }
 
 // ---- streaming tutor chat ----
-// Structured on purpose: Opus 4.8 follows explicit, sectioned instructions very
-// literally, so each rule is stated once, positively, in its own line. The
-// stealth constraint (never mention being an AI / generated text) is load-bearing.
+// Structured on purpose: Fable 5 (like Opus 4.8) follows explicit, sectioned
+// instructions very literally, so each rule is stated once, positively, in its
+// own line. The stealth constraint (never mention being an AI / generated
+// text) is load-bearing.
 const CHAT_SYSTEM =
   'You are the course notes ("Notizen") for the German university database course ' +
   '"DSCB140 - Datenbanken & Datenkunde" (lectures VL1-VL7, 317 slides with global slide numbers). ' +
@@ -300,9 +303,17 @@ function toOpenAIMessages(messages) {
 // Adaptive thinking is on, so the model decides how much to reason internally
 // before any visible text — the first TEXT token can lag while it thinks, so give
 // that phase room. Depth is set by REASONING_EFFORT, not a token budget
-// (budget_tokens is removed on Opus 4.8; adaptive thinking + effort replaces it).
+// (budget_tokens is removed on Fable 5/Opus 4.8; adaptive thinking + effort replaces it).
 const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
 const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day)
+// Fable 5's safety classifiers can (rarely) decline a request with
+// stop_reason "refusal" instead of an HTTP error. The server-side fallback
+// re-runs the same request on Opus 4.8 inside the same call, so the tutor
+// still answers. Only wired up for Fable/Mythos models — an Opus model set
+// via the models.opus config override streams plain, without the beta.
+const FABLE_FALLBACK_MODEL = "claude-opus-4-8";
+const FABLE_FALLBACK_BETA = "server-side-fallback-2026-06-01";
+const isFableModel = (m) => /fable|mythos/i.test(String(m || ""));
 // The client may override effort per request (whitelisted): ":fast" answers run
 // at "medium" for latency; the cross-check arbiter runs at "xhigh" for depth.
 const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
@@ -317,23 +328,37 @@ async function streamAnthropic(p, key, messages, write, signal, effort) {
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
-  // NOTE: do not add temperature/top_p/top_k — Opus 4.8 rejects non-default
-  // sampling params with a 400. Precision is steered via CHAT_SYSTEM + effort.
-  const stream = client.messages.stream(
-    {
-      model: p.model,
-      max_tokens: 32000,                              // thinking counts toward max_tokens; headroom prevents truncated answers at high effort
-      thinking: { type: "adaptive" },                 // Opus 4.8 adaptive thinking — must be explicit (omitting it runs without thinking)
-      output_config: { effort: effort || REASONING_EFFORT }, // how deeply it reasons before answering
-      system: CHAT_SYSTEM,
-      messages: toClaudeMessages(messages),
-    },
-    { signal, timeout: 300000 }
-  );
+  // NOTE: do not add temperature/top_p/top_k — Fable 5 (and Opus 4.8) reject
+  // non-default sampling params with a 400. Precision is steered via
+  // CHAT_SYSTEM + effort. thinking:{type:"adaptive"} is accepted on both
+  // (on Fable 5 thinking is always on anyway; never send {type:"disabled"}).
+  const params = {
+    model: p.model,
+    max_tokens: 32000,                              // thinking counts toward max_tokens; headroom prevents truncated answers at high effort
+    thinking: { type: "adaptive" },                 // explicit on purpose — an Opus model via the models.opus override would otherwise run without thinking
+    output_config: { effort: effort || REASONING_EFFORT }, // how deeply it reasons before answering
+    system: CHAT_SYSTEM,
+    messages: toClaudeMessages(messages),
+  };
+  const opts = { signal, timeout: 300000 };
+  // Fable 5: opt into the server-side refusal fallback (beta) so a classifier
+  // decline is transparently re-served by Opus 4.8 on the same stream.
+  const stream = isFableModel(p.model)
+    ? client.beta.messages.stream(
+        Object.assign({}, params, {
+          betas: [FABLE_FALLBACK_BETA],
+          fallbacks: [{ model: FABLE_FALLBACK_MODEL }],
+        }),
+        opts
+      )
+    : client.messages.stream(params, opts);
   // only the visible answer is streamed; thinking deltas are never written out
   stream.on("text", (t) => { try { write(t); } catch (e) {} });
   const fm = await stream.finalMessage();
   if (fm && fm.stop_reason === "max_tokens") { try { write("\n\n… (gekürzt)"); } catch (e) {} }
+  // whole chain refused (Fable declined AND the Opus fallback declined, or the
+  // beta was unavailable) — say so instead of ending on a silent empty answer
+  if (fm && fm.stop_reason === "refusal") { try { write("\n\n(Anfrage wurde vom Modell abgelehnt — bitte umformulieren.)"); } catch (e) {} }
 }
 
 async function streamOpenAICompatible(p, key, messages, write, signal) {

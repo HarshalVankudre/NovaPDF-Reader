@@ -45,7 +45,7 @@ try {
 
   const compatOnly = createLLMConfig(cleanDir, {}, { ANTHROPIC_API_KEY: "anthropic-only" });
   assert.strictEqual(compatOnly.keys.opus, "anthropic-only");
-  assert.strictEqual(compatOnly.providers.opus.model, "claude-opus-4-8");
+  assert.strictEqual(compatOnly.providers.opus.model, "claude-fable-5", "the default model is Claude Fable 5 (provider id stays 'opus')");
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.rmSync(cleanDir, { recursive: true, force: true });

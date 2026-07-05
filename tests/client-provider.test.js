@@ -80,6 +80,11 @@ assert.match(app, /postQ\(\[\{ role: "user", content: adjBlocks \}\], "xhigh"\)/
 const serve = fs.readFileSync(path.join(ROOT, "serve.js"), "utf8");
 assert.match(serve, /function normalizeEffort\(/, "the server should whitelist client effort overrides");
 assert.match(serve, /normalizeEffort\(payload && payload\.effort\)/, "the /q payload effort should be honored");
+// Fable 5 refusal safety net: a classifier decline is re-served by Opus 4.8
+// on the same stream (server-side fallback beta), gated to Fable/Mythos models
+assert.match(serve, /FABLE_FALLBACK_BETA = "server-side-fallback-2026-06-01"/, "the refusal-fallback beta must be pinned");
+assert.match(serve, /fallbacks: \[\{ model: FABLE_FALLBACK_MODEL \}\]/, "Fable requests should carry the Opus fallback");
+assert.match(serve, /isFableModel\(p\.model\)/, "the fallback beta must only apply to Fable/Mythos models");
 
 const slideRefLiteral = app.match(/const SLIDE_REF_RE = (\/[^\n]+\/g);/);
 assert.ok(slideRefLiteral, "chat renderer should centralize slide-reference parsing");

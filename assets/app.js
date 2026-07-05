@@ -614,7 +614,7 @@
   let aiStreaming = false;
   let fastMode = false;     // :fast → text-only (no slide images) for a quick answer
   let autoRunSql = true;    // :auto → read-only SQL in answers runs by itself against the imported DB
-  let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in (⟳ Prüfen stays manual)
+  let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in
   let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
@@ -1195,33 +1195,23 @@
     });
     const lastTurn = aiThread[aiThread.length - 1];
     if (streamBodyEl && lastTurn && lastTurn.role === "assistant" && lastTurn.content) {
-      addAnswerActions(streamBodyEl, lastTurn); // re-opened thread keeps the check/copy bar
+      addAnswerActions(streamBodyEl, lastTurn); // re-opened thread keeps the copy bar
     }
     doc.scrollTop = doc.scrollHeight;
   }
 
-  // Action bar under the newest answer: one-click self-verification (the tutor
-  // re-checks its own result via the thread memory) and copy-whole-answer.
+  // Action bar under the newest answer: copy-whole-answer only (no visible
+  // re-check button; the bar also anchors the :check verdict chip).
   function addAnswerActions(el, turn) {
     if (!el || el.querySelector(".nt-actions")) return;
     const bar = document.createElement("div");
     bar.className = "nt-runbar nt-actions";
-    const chk = document.createElement("button");
-    chk.className = "nt-run";
-    chk.textContent = "⟳ Prüfen";
-    chk.title = "Antwort nochmals kritisch prüfen lassen";
-    chk.addEventListener("click", () => {
-      if (aiStreaming) return;
-      qInput.value = "Prüfe deine letzte Antwort kritisch Schritt für Schritt (Rechenwege, jede MC-Option einzeln, SQL gegen das Schema). " +
-        "Wenn alles stimmt: bestätige nur das Endergebnis in einer Zeile. Wenn nicht: gib die korrigierte Antwort.";
-      runAsk();
-    });
     const cp = document.createElement("button");
     cp.className = "nt-run nt-copy";
     cp.textContent = "⧉ Antwort";
     cp.title = "Ganze Antwort kopieren";
     cp.addEventListener("click", () => copyToClipboard((turn && turn.content) || el.innerText, cp, "⧉ Antwort"));
-    bar.appendChild(chk); bar.appendChild(cp);
+    bar.appendChild(cp);
     el.appendChild(bar);
   }
 

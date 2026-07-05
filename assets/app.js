@@ -105,8 +105,8 @@
     try { if (localStorage.getItem("aiBarVisible") === "1") aiBar.hidden = false; } catch (e) {} // stealth: hidden by default
     try { fastMode = localStorage.getItem("aiFast") === "1"; } catch (e) {}
     try { autoRunSql = localStorage.getItem("aiAutoRun") !== "0"; } catch (e) {} // read-only SQL auto-runs by default
-    try { autoAsk = localStorage.getItem("aiAutoAsk") !== "0"; } catch (e) {}    // paste-to-ask on by default
-    try { checkMode = localStorage.getItem("aiCheck") !== "0"; } catch (e) {}    // Gegenprüfung on by default
+    try { localStorage.removeItem("aiAutoAsk"); } catch (e) {}                   // paste-to-ask was removed — clean up the old flag
+    try { checkMode = localStorage.getItem("aiCheck") === "1"; } catch (e) {}    // Gegenprüfung OFF unless :check turned it on
     restoreThread(); // one-shot mode: purges any thread an older build left in localStorage
 
     document.body.classList.add("stealth"); // keep the brand hidden; sidebar stays visible by default
@@ -613,7 +613,6 @@
   let aiThread = [];        // [{role:'user'|'assistant', content, q}] — persists across asks (short memory); :new clears it
   let aiStreaming = false;
   let fastMode = false;     // :fast → text-only (no slide images) for a quick answer
-  let autoAsk = false;      // OFF by default — paste never asks by itself; :ask opts back into instant paste-to-ask
   let autoRunSql = true;    // :auto → read-only SQL in answers runs by itself against the imported DB
   let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in (⟳ Prüfen stays manual)
   let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
@@ -689,22 +688,9 @@
     });
   }
 
-  // Heuristic: does a pasted text look like an exam task rather than a search
-  // term? Multi-line or long pastes, question marks, MC options and German
-  // task verbs all say "task" — short one-liners stay live-search.
-  function looksLikeExamQuestion(t) {
-    const s = String(t || "").trim();
-    if (s.length < 60 || s.charAt(0) === ":") return false;
-    if (/\n/.test(s)) return true;                    // multi-line paste = task text
-    if (s.length >= 200) return true;                 // very long single line
-    return /\?/.test(s) ||
-      /(^|\n)\s*[a-eA-E][).]\s/.test(s) ||            // MC options a) b) c)
-      /\b(aufgabe|welche|wahr|falsch|richtig|trifft|kreuzen|erkl(ä|ae)ren|nennen|geben sie|schreiben sie|formulieren|select)\b/i.test(s);
-  }
-
   // One paste pipeline for the whole app (search box AND anywhere else):
-  // images/files are attached; pasted text goes to live search. Nothing asks
-  // by itself unless :ask re-enables the instant behavior (autoAsk, default off).
+  // images/files attach as chips, text goes to live search. Pasting can NEVER
+  // reach the tutor — asking requires the chords or the Ask button.
   async function handlePaste(e) {
     const cd = e.clipboardData;
     if (!cd) return;
@@ -721,13 +707,9 @@
     for (const f of (cd.files || [])) consider(f);
 
     if (!imgBlobs.length && !textBlobs.length) {
-      // plain text: a pasted exam task asks itself; anything else becomes a search
+      // plain text is only ever a search — never a question to the tutor
       const txt = (cd.getData && cd.getData("text/plain")) || "";
-      if (autoAsk && looksLikeExamQuestion(txt)) { // streaming? runAsk queues it
-        e.preventDefault();
-        qInput.value = txt.trim();
-        runAsk();
-      } else if (!fromInput && txt.trim()) {
+      if (!fromInput && txt.trim()) {
         e.preventDefault();
         revealSearch(true);
         qInput.value = txt.trim().slice(0, 300);
@@ -749,9 +731,7 @@
     }
     renderAttachments();
     if (!fromInput && (pendingImages.length || pendingFiles.length)) revealSearch(false);
-    // a screenshot with nothing typed IS the whole question → ask instantly
-    // (if an answer is still streaming, runAsk queues it and fires it next)
-    if (autoAsk && imgBlobs.length && pendingImages.length && !qInput.value.trim()) runAsk();
+    // attachments just wait as chips — sending them takes an explicit chord/button
   }
 
   // Discreet attachment strip: thumbnails of queued screenshots + chips for queued
@@ -1471,19 +1451,13 @@
       showAiToast(autoRunSql ? "SQL-Autorun an" : "SQL-Autorun aus");
       done();
     }
-    else if (raw === "ask" || raw === "paste" || raw === "autoask") {
-      autoAsk = !autoAsk;
-      try { localStorage.setItem("aiAutoAsk", autoAsk ? "1" : "0"); } catch (e) {}
-      showAiToast(autoAsk ? "Einfügen fragt sofort" : "Einfügen fragt nicht automatisch");
-      done();
-    }
     else if (raw === "check" || raw === "pruefen" || raw === "prüfen") {
       checkMode = !checkMode;
       try { localStorage.setItem("aiCheck", checkMode ? "1" : "0"); } catch (e) {}
       showAiToast(checkMode ? "Gegenprüfung an (✓✓)" : "Gegenprüfung aus");
       done();
     }
-    else { showAiToast(":ai  :new  :notes  :sql  :fast  :vision  :auto  :ask  :check"); done(); }
+    else { showAiToast(":ai  :new  :notes  :sql  :fast  :vision  :auto  :check"); done(); }
   }
   function setFastMode(on) {
     fastMode = !!on;
@@ -1537,7 +1511,7 @@
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
         if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :sql, :fast, :vision
-        if (askChord(e) || pendingImages.length || pendingFiles.length) { e.preventDefault(); stripHeldD(); runAsk(); return; } // Ctrl+Alt+Enter / d+Enter = ask; plain Enter asks when a screenshot/file is attached
+        if (askChord(e)) { e.preventDefault(); stripHeldD(); runAsk(); return; } // ONLY Ctrl+Alt+Enter / d+Enter ask — plain Enter never does, attachments included
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }
     });
@@ -1546,9 +1520,9 @@
     // PASTE = ATTACH/SEARCH, never ask. Pasting anywhere in the app:
     //   · text                        → lands in the search box (live search)
     //   · screenshots / .sql files    → attach as context chips
-    // Asking only happens via the chords (Ctrl+Alt+Enter / d+Enter), the Ask
-    // button, or Enter with an attachment. :ask opts back into the old
-    // instant paste-to-ask behavior. The SQL editor keeps its own paste.
+    // Asking happens ONLY via the chords (Ctrl+Alt+Enter / d+Enter) or the
+    // Ask button — there is no paste-to-ask anymore. The SQL editor keeps
+    // its own paste.
     qInput.addEventListener("paste", handlePaste);
     document.addEventListener("paste", (e) => {
       const t = e.target;

@@ -28,10 +28,13 @@ assert.match(app, /const messages = \[\{ role: "user", content: blocks \}\];/,
   "each question must be sent without any thread history");
 assert.doesNotMatch(app, /history\.concat/, "no request may carry prior Q/A pairs");
 
-// paste never asks by itself — :ask is an explicit opt-in for the instant behavior
-assert.match(app, /let autoAsk = false;/, "paste-to-ask must be OFF by default");
-assert.match(app, /function looksLikeExamQuestion\(/, "pasted exam tasks should be detected (used only when :ask is on)");
-assert.match(app, /document\.addEventListener\("paste"/, "paste should work anywhere in the app");
+// paste can NEVER reach the tutor — the paste-to-ask feature is fully removed
+// (a lingering localStorage flag from old builds must not resurrect it either)
+assert.doesNotMatch(app, /autoAsk/, "paste-to-ask must not exist at all");
+assert.doesNotMatch(app, /looksLikeExamQuestion/, "the exam-task paste heuristic must be gone");
+assert.match(app, /localStorage\.removeItem\("aiAutoAsk"\)/, "the old paste-to-ask flag must be purged at startup");
+assert.match(app, /localStorage\.getItem\("aiCheck"\) === "1"/, "Gegenprüfung must stay off unless :check stored an explicit on");
+assert.match(app, /document\.addEventListener\("paste"/, "paste should still attach/search anywhere in the app");
 // auto-run is gated to provably read-only SQL (WITH … DELETE must never auto-run)
 assert.match(app, /const READONLY_SQL = /, "auto-run must whitelist read-only statement starts");
 assert.match(app, /const WRITE_SQL = /, "auto-run must additionally blacklist write keywords");

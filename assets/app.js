@@ -1385,9 +1385,9 @@
       SqlSandbox.runInline(bar, sql, btn);
     } catch (e) {}
   }
-  // Add a "Run" button under each SQL code block the tutor writes, executing it
-  // in the sandbox against the imported exam DB and showing the result inline.
-  // With autorun (final render of an answer), read-only queries execute themselves.
+  // Under each SQL code block the tutor writes: a copy button only (no visible
+  // Run button). With autorun (final render of an answer), read-only queries
+  // still execute themselves silently and show the result inline.
   function wireSqlRuns(container, autorun) {
     let autoRuns = 0;
     container.querySelectorAll("pre.lang-sql, pre.lang-mysql").forEach((pre) => {
@@ -1397,12 +1397,6 @@
       pre.dataset.wired = "1";
       const bar = document.createElement("div");
       bar.className = "nt-runbar";
-      const btn = document.createElement("button");
-      btn.className = "nt-run";
-      btn.textContent = "▷ Ausführen";
-      btn.title = "SQL gegen die importierte Datenbank ausführen";
-      btn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.runInline(bar, code.textContent, btn); });
-      bar.appendChild(btn);
       const copyBtn = document.createElement("button");
       copyBtn.className = "nt-run nt-copy";
       copyBtn.textContent = "⧉ Kopieren";
@@ -1410,7 +1404,7 @@
       copyBtn.addEventListener("click", () => copyToClipboard(code.textContent, copyBtn, "⧉ Kopieren"));
       bar.appendChild(copyBtn);
       pre.parentNode.insertBefore(bar, pre.nextSibling);
-      if (autorun && autoRuns < 3) { autoRuns++; maybeAutoRunSql(bar, code.textContent, btn); }
+      if (autorun && autoRuns < 3) { autoRuns++; maybeAutoRunSql(bar, code.textContent, null); }
     });
   }
   // copy text to the clipboard with a graceful fallback; flashes "✓ Kopiert" on the button

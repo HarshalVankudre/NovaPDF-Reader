@@ -28,8 +28,9 @@ assert.match(app, /const messages = \[\{ role: "user", content: blocks \}\];/,
   "each question must be sent without any thread history");
 assert.doesNotMatch(app, /history\.concat/, "no request may carry prior Q/A pairs");
 
-// paste = ask: exam-question-looking pastes (text or screenshot) ask instantly
-assert.match(app, /function looksLikeExamQuestion\(/, "pasted exam tasks should be detected");
+// paste never asks by itself — :ask is an explicit opt-in for the instant behavior
+assert.match(app, /let autoAsk = false;/, "paste-to-ask must be OFF by default");
+assert.match(app, /function looksLikeExamQuestion\(/, "pasted exam tasks should be detected (used only when :ask is on)");
 assert.match(app, /document\.addEventListener\("paste"/, "paste should work anywhere in the app");
 // auto-run is gated to provably read-only SQL (WITH … DELETE must never auto-run)
 assert.match(app, /const READONLY_SQL = /, "auto-run must whitelist read-only statement starts");
@@ -47,10 +48,12 @@ assert.match(app, /function zoomAt\(/, "cursor-anchored zoom should exist");
 assert.match(app, /localStorage\.removeItem\(THREAD_KEY\)/, "any stored thread must be actively deleted");
 assert.doesNotMatch(app, /localStorage\.setItem\(THREAD_KEY/, "the thread must never be written to localStorage");
 
-// Gegenprüfung: an independent shadow solve runs IN PARALLEL with the visible
-// answer; identical results confirm for free, a quick compare handles phrasing
-// differences, and real conflicts go to a strict arbiter (2-of-3) so a wrong
-// "correction" can't flip a right answer
+// Gegenprüfung is OFF by default (:check opts in); when on: an independent
+// shadow solve runs IN PARALLEL with the visible answer; identical results
+// confirm for free, a quick compare handles phrasing differences, and real
+// conflicts go to a strict arbiter (2-of-3) so a wrong "correction" can't
+// flip a right answer
+assert.match(app, /let checkMode = false;/, "the automatic Gegenprüfung must be OFF by default");
 assert.match(app, /const shadowPromise = wantCheck \? postQ\(messages\)/,
   "the shadow solve should start in parallel with the visible answer");
 assert.match(app, /async function crossCheckAnswer\(/, "answers should be cross-checked");
@@ -59,8 +62,9 @@ assert.match(app, /"GLEICH"/, "the compare verdict protocol should exist");
 assert.match(app, /Schiedsprüfung/, "conflicts should be settled by an arbiter solve");
 assert.match(app, /async function sqlEvidenceFor\(/, "SQL answers should be checked against real execution evidence");
 assert.match(sandbox, /async function execForCheck\(/, "the sandbox should expose the silent evidence executor");
-// one-press stealth + lean vision for pasted tasks
-assert.match(app, /function panicHide\(/, "a single Esc should drop to the bare viewer");
+// Esc closes only the notes and restores the normal UI — never hides the sidebar
+assert.match(app, /function panicHide\(/, "Esc should close the notes and restore the normal UI");
+assert.doesNotMatch(app, /classList\.add\("viewer-only"\)/, "Esc must not hide the search sidebar");
 assert.match(app, /const pastedTask = q\.length >= 160;/, "pasted tasks should skip weak slide-image overhead");
 // resilience + rapid-fire flow
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");

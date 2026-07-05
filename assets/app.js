@@ -613,9 +613,9 @@
   let aiThread = [];        // [{role:'user'|'assistant', content, q}] — persists across asks (short memory); :new clears it
   let aiStreaming = false;
   let fastMode = false;     // :fast → text-only (no slide images) for a quick answer
-  let autoAsk = true;       // :ask → pasted exam tasks (text/screenshot) ask instantly, no extra keystroke
+  let autoAsk = false;      // OFF by default — paste never asks by itself; :ask opts back into instant paste-to-ask
   let autoRunSql = true;    // :auto → read-only SQL in answers runs by itself against the imported DB
-  let checkMode = true;     // :check → every answer is silently re-solved + cross-checked (2-of-3 on conflict)
+  let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in (⟳ Prüfen stays manual)
   let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
@@ -625,18 +625,13 @@
     document.body.classList.remove("viewer-only");
     if (shouldFocus !== false) qInput.focus();
   }
-  function hideSearch() {
-    if (!aiPanel.hidden) closeChat();
-    document.body.classList.add("viewer-only");
-    qInput.blur();
-  }
-  // One-press panic: a single Esc from anywhere drops straight to the bare
-  // PDF viewer — notes, sidebar, sandbox, hover previews and toasts all go at
-  // once (no Esc-Esc-Esc chain while someone walks past).
+  // Esc closes ONLY the tutor notes (plus hover previews and toasts) and
+  // returns to the normal search+viewer UI — the sidebar stays visible.
+  // The sandbox is left alone; it closes via its own Esc or the SQL button.
   function panicHide() {
-    try { if (window.SqlSandbox) SqlSandbox.close(); } catch (e) {}
     try { hideRefPreview(); } catch (e) {}
-    hideSearch(); // also closes the notes panel if open
+    if (!aiPanel.hidden) closeChat();
+    revealSearch(false); // normal mode — no focus grab
     const t = document.getElementById("aiToast");
     if (t) t.classList.remove("show");
   }
@@ -708,7 +703,8 @@
   }
 
   // One paste pipeline for the whole app (search box AND anywhere else):
-  // images/files are attached; exam-question text asks immediately (autoAsk).
+  // images/files are attached; pasted text goes to live search. Nothing asks
+  // by itself unless :ask re-enables the instant behavior (autoAsk, default off).
   async function handlePaste(e) {
     const cd = e.clipboardData;
     if (!cd) return;
@@ -1537,7 +1533,7 @@
     qInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
         e.preventDefault(); e.stopPropagation();
-        panicHide(); // one press → bare viewer (typed text stays for later)
+        panicHide(); // one press → notes gone, normal UI back (typed text stays)
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
         if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :sql, :fast, :vision
@@ -1547,14 +1543,12 @@
     });
     clearBtn.addEventListener("click", () => { qInput.value = ""; onInput(); qInput.focus(); });
     askAiBtn.addEventListener("click", runAsk);
-    // PASTE = ASK. The main exam flow is pasting a task — as text or as a
-    // screenshot — so pasting ANYWHERE in the app goes straight to the tutor:
-    //   · exam-question-looking text  → asks instantly (no ask chord needed)
-    //   · screenshot + empty input    → asks instantly
-    //   · screenshot + typed text     → attaches (Enter sends, as before)
-    //   · .sql/text files             → attach as context chips
-    //   · short plain text            → normal live search
-    // :ask toggles the instant behavior. The SQL editor keeps its own paste.
+    // PASTE = ATTACH/SEARCH, never ask. Pasting anywhere in the app:
+    //   · text                        → lands in the search box (live search)
+    //   · screenshots / .sql files    → attach as context chips
+    // Asking only happens via the chords (Ctrl+Alt+Enter / d+Enter), the Ask
+    // button, or Enter with an attachment. :ask opts back into the old
+    // instant paste-to-ask behavior. The SQL editor keeps its own paste.
     qInput.addEventListener("paste", handlePaste);
     document.addEventListener("paste", (e) => {
       const t = e.target;
@@ -1606,7 +1600,8 @@
       if (e.key === "Escape" && snipArm) { e.preventDefault(); setSnipArm(false); return; }
       const t = e.target;
       const typing = t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA");
-      // the sandbox editor handles its own Esc (closes the drawer); everything else panics
+      // the sandbox editor handles its own Esc (closes the drawer); everywhere
+      // else Esc closes just the notes and restores the normal UI
       if (e.key === "Escape" && !typing) { e.preventDefault(); panicHide(); return; }
       if (e.key === "/" && !typing) { e.preventDefault(); revealSearch(true); } // reveal search
       else if (!typing && e.key === "Enter" && askChord(e)) { e.preventDefault(); runAsk(); } // the ask chords work from the viewer too

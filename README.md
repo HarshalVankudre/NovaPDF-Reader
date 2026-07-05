@@ -42,7 +42,7 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | **`/`** | Reveal the hidden search sidebar (focus it). Brand stays hidden. |
 | **Ctrl + Alt + Enter** or **hold `d` + Enter** | Ask the tutor (streams into the "Notizen" pane); works in the search box and from the bare viewer |
 | **paste a screenshot / `.sql` file** | Attach it to the next question — a screenshot becomes the question; a copied `.sql`/text file is attached as context the tutor reads (Enter then sends) |
-| **Esc** | Step back: close notes → clear query → hide search → plain viewer |
+| **Esc** | Close the tutor notes and return to the normal search + viewer |
 | **← / →** | Previous / next page (works in plain-viewer mode too) |
 | type `:new` ↵ | Start a fresh conversation (clears the thread) |
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |

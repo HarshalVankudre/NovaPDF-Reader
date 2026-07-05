@@ -295,19 +295,12 @@
     layerEl.appendChild(frag);
   }
 
-  // ===================== region snip → ask (Alt+drag / ✂) ==================
-  // Draw a box on the slide (hold Alt and drag, or arm once via the ✂ button):
-  // that region is cut out of a fresh high-res render and queued as an image
-  // question — the tutor is told which Folie the snippet came from, so the
-  // answer is grounded in that slide's text AND its pixels.
-  let snipArm = false;
+  // ===================== region snip → ask (Alt+drag) ======================
+  // Draw a box on the slide (hold Alt and drag): that region is cut out of a
+  // fresh high-res render and queued as an image question — the tutor is told
+  // which Folie the snippet came from, so the answer is grounded in that
+  // slide's text AND its pixels.
   let snipMarq = null;
-  function setSnipArm(on) {
-    snipArm = !!on;
-    canvasScroll.classList.toggle("snip-armed", snipArm);
-    const b = $("snipBtn");
-    if (b) b.classList.toggle("tb-on", snipArm);
-  }
   async function snipRegion(page, nx, ny, nw, nh) {
     const L = pageToLecture[page];
     const doc = await getLectureDoc(L);
@@ -327,7 +320,7 @@
   }
   function wireSnip() {
     pageWrap.addEventListener("mousedown", (e) => {
-      if (e.button !== 0 || !(e.altKey || snipArm)) return;
+      if (e.button !== 0 || !e.altKey) return;
       e.preventDefault();
       const page = pageNum;
       const r0 = pageWrap.getBoundingClientRect();
@@ -353,7 +346,6 @@
         const x = Math.min(sx, c[0]), y = Math.min(sy, c[1]);
         const w = Math.abs(c[0] - sx), h = Math.abs(c[1] - sy);
         try { snipMarq.remove(); } catch (e2) {}
-        setSnipArm(false);
         if (w < 16 || h < 16) return; // treat as a mis-click, not a snip
         if (pendingImages.length >= 4) { showAiToast("max. 4 Anhänge"); return; }
         showAiToast("Ausschnitt wird erstellt…");
@@ -626,7 +618,7 @@
   }
   // Esc closes ONLY the tutor notes (plus hover previews and toasts) and
   // returns to the normal search+viewer UI — the sidebar stays visible.
-  // The sandbox is left alone; it closes via its own Esc or the SQL button.
+  // The sandbox is left alone; it closes via its own Esc (`:sql` toggles it).
   function panicHide() {
     try { hideRefPreview(); } catch (e) {}
     if (!aiPanel.hidden) closeChat();
@@ -1535,10 +1527,6 @@
       zoomAt(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY);
     }, { passive: false });
     wireSnip();
-    const snipBtn = $("snipBtn");
-    if (snipBtn) snipBtn.addEventListener("click", () => setSnipArm(!snipArm));
-    const sqlBtn = $("sqlBtn");
-    if (sqlBtn) sqlBtn.addEventListener("click", () => { if (window.SqlSandbox) window.SqlSandbox.toggle(); });
     // sandbox → tutor bridge: a failed query offers one-click auto-correction;
     // the corrected answer streams into the notes (and auto-runs if read-only)
     document.addEventListener("sqlfix", (e) => {
@@ -1555,7 +1543,6 @@
     });
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && snipArm) { e.preventDefault(); setSnipArm(false); return; }
       const t = e.target;
       const typing = t && (t.tagName === "INPUT" || t.tagName === "SELECT" || t.tagName === "TEXTAREA");
       // the sandbox editor handles its own Esc (closes the drawer); everywhere

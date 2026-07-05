@@ -516,13 +516,11 @@ body.viewer-only .sidebar { display: none; }
 .sbx-fix { margin-top: 8px; }
 .nt-sql-result .sbx-fix { margin: 6px 0 0; padding: 5px 12px; font-size: 12px; }
 
-/* region snip (Alt+drag or the ✂ button): marquee + armed cursor */
-.canvas-scroll.snip-armed, .canvas-scroll.snip-armed #pdfCanvas { cursor: crosshair; }
+/* region snip (Alt+drag): marquee */
 .snip-marq {
   position: absolute; z-index: 5; pointer-events: none; border-radius: 2px;
   border: 1.5px dashed var(--green-dark); background: rgba(47, 141, 70, .10);
 }
-.tb-btn.tb-on { background: var(--green-tint); color: var(--green-darker); }
 
 /* floating slide preview when hovering a (Folie N) citation */
 .ref-preview {

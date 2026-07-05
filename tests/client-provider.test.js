@@ -44,7 +44,9 @@ const sandbox = fs.readFileSync(path.join(ROOT, "assets", "sandbox.js"), "utf8")
 assert.match(sandbox, /CustomEvent\("sqlfix"/, "a failed sandbox query should offer one-click repair");
 // viewer magic: region snip, citation hover previews, cursor-anchored zoom
 assert.match(app, /async function snipRegion\(/, "Alt+drag region snip should exist");
-assert.match(html, /id="snipBtn"/, "the ✂ toolbar button should exist");
+// the toolbar carries no ✂/SQL buttons — snip is Alt+drag only, the sandbox opens via :sql
+assert.doesNotMatch(html, /id="snipBtn"/, "the ✂ toolbar button must be gone");
+assert.doesNotMatch(html, /id="sqlBtn"/, "the SQL toolbar button must be gone");
 assert.match(app, /function showRefPreview\(/, "citation hover previews should exist");
 assert.match(app, /function zoomAt\(/, "cursor-anchored zoom should exist");
 // ONE-SHOT: nothing persists — persistThread actively removes any stored thread

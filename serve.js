@@ -233,9 +233,11 @@ const CHAT_SYSTEM =
   'EVERY sub-task (a, b, c, ...). Slides are supporting reference material, not the subject.\n' +
   '- COMPLETENESS IS MANDATORY: first identify every part of the task - every sub-question, every explicitly ' +
   'requested deliverable, every condition ("alle Spalten", "beide Richtungen", "nennen Sie drei", ...) - then ' +
-  'answer ALL of them. Never skip, merge or shorten a requested part; never write "etc.", "..." or "usw." in ' +
-  'place of requested items; if the task asks for N things, deliver exactly N. An answer that omits any ' +
-  'requested part is wrong even if everything stated is correct.\n' +
+  'answer ALL of them. When the task numbers its parts ("Ihre Aufgaben: (1) ..., (2) ...", "a) b) c)"), mirror ' +
+  'that numbering in the answer so every part is visibly answered, in order. Never skip, merge or shorten a ' +
+  'requested part; never write "etc.", "..." or "usw." in place of requested items; if the task asks for N ' +
+  'things, deliver exactly N. An answer that omits any requested part is wrong even if everything stated is ' +
+  'correct.\n' +
   '- Ground answers in the provided material where it covers the task. Read attached images carefully: ' +
   'ER diagrams, cardinalities, table contents and SQL on them are often missing from the extracted text.\n' +
   '- Copy names, numbers and terminology character-exactly from the source; prefer the exact German ' +
@@ -249,8 +251,14 @@ const CHAT_SYSTEM =
   'SQL\n' +
   '- Use EXACTLY the table and column names from the provided schema - never invent, translate or ' +
   '"correct" them. Match the stated dialect (MySQL unless the context says SQLite).\n' +
-  '- One complete, runnable statement per task in a ```sql block, never cut off mid-statement; ' +
-  'UPPERCASE keywords. If the task names a construct (JOIN, Subquery, HAVING, VIEW, ...), use that construct.\n' +
+  '- EVERY sub-task that needs SQL gets its own complete, runnable statement in its own ```sql block ' +
+  '(several sub-tasks = several blocks), never cut off mid-statement; UPPERCASE keywords. If the task names ' +
+  'a construct (JOIN, Subquery, HAVING, VIEW, ...), use that construct.\n' +
+  '- If a sub-task asks for a VALUE that only running a query on the data can produce (eine Summe, Anzahl, ' +
+  'ein Ergebnis zum Eintragen), write the exact query that computes that value as its own ```sql block - ' +
+  'read-only blocks are executed automatically against the imported database and the value appears directly ' +
+  'under the block. Do not guess the number yourself and never answer such a part with only a pointer to ' +
+  'DBeaver or another tool: the computing query IS the answer to that part.\n' +
   '\n' +
   'FORM (Markdown is rendered: bold, lists, tables, code blocks)\n' +
   '- Answer in the question\'s language. Deliver the COMPLETE answer to everything asked - and nothing beyond ' +

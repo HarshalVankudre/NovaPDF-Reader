@@ -40,7 +40,7 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | Key / command | Action |
 |---|---|
 | **`/`** | Reveal the hidden search sidebar (focus it). Brand stays hidden. |
-| **Ctrl + Enter** (in search) | Ask the tutor (streams into the "Notizen" pane) |
+| **Ctrl + Alt + Enter** or **hold `d` + Enter** | Ask the tutor (streams into the "Notizen" pane); works in the search box and from the bare viewer |
 | **paste a screenshot / `.sql` file** | Attach it to the next question — a screenshot becomes the question; a copied `.sql`/text file is attached as context the tutor reads (Enter then sends) |
 | **Esc** | Step back: close notes → clear query → hide search → plain viewer |
 | **← / →** | Previous / next page (works in plain-viewer mode too) |
@@ -48,7 +48,7 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
 Every question — text and pasted screenshots alike — uses Anthropic
-**Claude Sonnet 5** (`claude-sonnet-5`); it's multimodal with high-res vision, so it reads
+**Claude Opus 4.8** (`claude-opus-4-8`); it's multimodal with high-res vision, so it reads
 screenshots and slide images directly. It's the only model — there's no picker
 and no switching command. The proxy endpoints are `/q` (streaming chat) and
 `/llm` (single-shot, legacy) — neutral names, keys server-side only.

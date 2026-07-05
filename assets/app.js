@@ -8,10 +8,10 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const AI_PROVIDER = "sonnet";            // the only model: Anthropic Claude Sonnet 5 (text + high-res vision)
+  const AI_PROVIDER = "opus";              // the only model: Anthropic Claude Opus 4.8 (text + high-res vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
   const VISION_MAX = 4;    // cap incl. extra diagram-heavy slides pulled from ranks 4-6
-  const VISION_WIDTH = 2200; // vision render width — within Sonnet 5's 2576px high-res limit, so no API-side downscale
+  const VISION_WIDTH = 2200; // vision render width — within Opus 4.8's 2576px high-res limit, so no API-side downscale
   const THIN_TEXT = 180;   // slides with less extracted text than this are likely pure diagrams (content lives in the image)
 
   const $ = (id) => document.getElementById(id);
@@ -205,7 +205,7 @@
 
   // Render a slide to a JPEG data payload for the vision model. Rendered fresh at
   // a higher resolution than the thumbnail so diagrams/ER-models/SQL stay legible.
-  // Sonnet 5 accepts up to 2576px on the long edge without server-side downscaling,
+  // Opus 4.8 accepts up to 2576px on the long edge without server-side downscaling,
   // so everything rendered at VISION_WIDTH reaches the model pixel-for-pixel.
   async function renderSlideForVision(globalPage, width) {
     const L = pageToLecture[globalPage];
@@ -743,7 +743,7 @@
     e.preventDefault();
     for (const f of imgBlobs) {
       if (pendingImages.length >= 4) break;
-      // 2400px keeps even high-DPI screenshots under Sonnet 5's 2576px vision
+      // 2400px keeps even high-DPI screenshots under Opus 4.8's 2576px vision
       // limit without the API downscaling them — small exam text stays readable
       try { pendingImages.push(await processImageBlob(f, 2400)); } catch (err) {}
     }
@@ -993,7 +993,7 @@
     let assistantTurn = null;
 
     try {
-      // The only model is Claude Sonnet 5 (multimodal: text + screenshots).
+      // The only model is Claude Opus 4.8 (multimodal: text + screenshots).
       const provider = AI_PROVIDER;
 
       // BM25 slide text is for TEXT questions only.
@@ -1535,6 +1535,28 @@
 
   // ===================== events =====================
   function wireEvents() {
+    // Ask chords: Ctrl+Alt+Enter (or Cmd+Alt+Enter; AltGr+Enter also matches on
+    // German keyboards) asks the tutor, and so does holding "d" while pressing
+    // Enter — a deliberately unremarkable gesture. Plain Ctrl+Enter no longer
+    // asks (the sandbox keeps it for Run). Holding "d" in the search box
+    // auto-repeats "ddd…" into it, so the hold records where it started and the
+    // chord removes exactly those characters before sending.
+    let dHeld = false, dHoldPos = -1;
+    const askChord = (e) => ((e.ctrlKey || e.metaKey) && e.altKey) || dHeld;
+    const resetDHold = () => { dHeld = false; dHoldPos = -1; };
+    document.addEventListener("keydown", (e) => {
+      if (e.repeat || (e.key !== "d" && e.key !== "D") || e.ctrlKey || e.metaKey || e.altKey) return;
+      dHeld = true;
+      dHoldPos = document.activeElement === qInput ? (qInput.selectionStart == null ? qInput.value.length : qInput.selectionStart) : -1;
+    });
+    document.addEventListener("keyup", (e) => { if (e.key === "d" || e.key === "D") resetDHold(); });
+    window.addEventListener("blur", resetDHold);
+    function stripHeldD() {
+      if (!dHeld || dHoldPos < 0) return;
+      const pos = qInput.selectionStart == null ? qInput.value.length : qInput.selectionStart;
+      if (pos > dHoldPos) qInput.value = qInput.value.slice(0, dHoldPos) + qInput.value.slice(pos);
+    }
+
     qInput.addEventListener("input", onInput);
     qInput.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
@@ -1543,7 +1565,7 @@
       } else if (e.key === "Enter") {
         const v = qInput.value.trim();
         if (v.charAt(0) === ":") { e.preventDefault(); handleSecretCommand(v); return; } // :ai, :new, :sql, :fast, :vision
-        if (e.ctrlKey || e.metaKey || pendingImages.length || pendingFiles.length) { e.preventDefault(); runAsk(); return; } // Ctrl/Cmd+Enter = ask; plain Enter asks when a screenshot/file is attached
+        if (askChord(e) || pendingImages.length || pendingFiles.length) { e.preventDefault(); stripHeldD(); runAsk(); return; } // Ctrl+Alt+Enter / d+Enter = ask; plain Enter asks when a screenshot/file is attached
         const f = resultsEl.querySelector(".pg-thumb"); if (f) f.click();
       }
     });
@@ -1551,7 +1573,7 @@
     askAiBtn.addEventListener("click", runAsk);
     // PASTE = ASK. The main exam flow is pasting a task — as text or as a
     // screenshot — so pasting ANYWHERE in the app goes straight to the tutor:
-    //   · exam-question-looking text  → asks instantly (no Ctrl+Enter needed)
+    //   · exam-question-looking text  → asks instantly (no ask chord needed)
     //   · screenshot + empty input    → asks instantly
     //   · screenshot + typed text     → attaches (Enter sends, as before)
     //   · .sql/text files             → attach as context chips
@@ -1611,6 +1633,7 @@
       // the sandbox editor handles its own Esc (closes the drawer); everything else panics
       if (e.key === "Escape" && !typing) { e.preventDefault(); panicHide(); return; }
       if (e.key === "/" && !typing) { e.preventDefault(); revealSearch(true); } // reveal search
+      else if (!typing && e.key === "Enter" && askChord(e)) { e.preventDefault(); runAsk(); } // the ask chords work from the viewer too
       else if (!typing && e.key === "ArrowLeft") { e.preventDefault(); goToPage(pageNum - 1); }
       else if (!typing && e.key === "ArrowRight") { e.preventDefault(); goToPage(pageNum + 1); }
     });

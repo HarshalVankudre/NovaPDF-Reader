@@ -204,8 +204,8 @@ async function askOpenAICompatible(p, key, system, user) {
 }
 
 async function askLLM(question, candidates) {
-  const p = PROVIDERS.sonnet;
-  const key = KEYS.sonnet;
+  const p = PROVIDERS.opus;
+  const key = KEYS.opus;
   if (!key) {
     const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
@@ -218,7 +218,7 @@ async function askLLM(question, candidates) {
 }
 
 // ---- streaming tutor chat ----
-// Structured on purpose: Sonnet 5 follows explicit, sectioned instructions very
+// Structured on purpose: Opus 4.8 follows explicit, sectioned instructions very
 // literally, so each rule is stated once, positively, in its own line. The
 // stealth constraint (never mention being an AI / generated text) is load-bearing.
 const CHAT_SYSTEM =
@@ -285,7 +285,7 @@ function toOpenAIMessages(messages) {
 // Adaptive thinking is on, so the model decides how much to reason internally
 // before any visible text — the first TEXT token can lag while it thinks, so give
 // that phase room. Depth is set by REASONING_EFFORT, not a token budget
-// (budget_tokens is removed on Sonnet 5; adaptive thinking + effort replaces it).
+// (budget_tokens is removed on Opus 4.8; adaptive thinking + effort replaces it).
 const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
 const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day)
 // The client may override effort per request (whitelisted): ":fast" answers run
@@ -302,13 +302,13 @@ async function streamAnthropic(p, key, messages, write, signal, effort) {
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
-  // NOTE: do not add temperature/top_p/top_k — Sonnet 5 rejects non-default
+  // NOTE: do not add temperature/top_p/top_k — Opus 4.8 rejects non-default
   // sampling params with a 400. Precision is steered via CHAT_SYSTEM + effort.
   const stream = client.messages.stream(
     {
       model: p.model,
       max_tokens: 32000,                              // thinking counts toward max_tokens; headroom prevents truncated answers at high effort
-      thinking: { type: "adaptive" },                 // Sonnet 5 adaptive thinking (replaces budget_tokens)
+      thinking: { type: "adaptive" },                 // Opus 4.8 adaptive thinking — must be explicit (omitting it runs without thinking)
       output_config: { effort: effort || REASONING_EFFORT }, // how deeply it reasons before answering
       system: CHAT_SYSTEM,
       messages: toClaudeMessages(messages),
@@ -572,7 +572,7 @@ function handleRequest(req, res) {
     readJsonBody(req, res, 4e6, async (payload) => {
       const { question, candidates } = payload || {};
       if (!question || !Array.isArray(candidates)) return sendJson(res, 400, { error: "Missing question or candidates" });
-      console.log("POST /llm  provider=sonnet  candidates=" + candidates.length);
+      console.log("POST /llm  provider=opus  candidates=" + candidates.length);
       try {
         const result = await askLLM(String(question), candidates);
         sendJson(res, 200, result);
@@ -593,7 +593,7 @@ function handleRequest(req, res) {
       const chain = providerChainForMessages(messages, normalizeProvider(payload && payload.provider));
       const usable = chain.find((n) => KEYS[n]);
       if (!usable) {
-        const need = PROVIDERS[chain[0]] || PROVIDERS.sonnet;
+        const need = PROVIDERS[chain[0]] || PROVIDERS.opus;
         return sendJson(res, 400, { error: "No API key for " + need.label + ". Set " + need.envHint + " or add it to serve.config.json, then restart the server." });
       }
       console.log("POST /q  chain=[" + chain.join(",") + "]  image=" + messagesContainImage(messages) + "  turns=" + messages.length);
@@ -714,7 +714,7 @@ if (require.main === module) {
   server.listen(PORT, () => {
     console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
     console.log(`serving ${ROOT}`);
-    console.log("LLM key present: sonnet=" + !!KEYS.sonnet);
+    console.log("LLM key present: opus=" + !!KEYS.opus);
     mysqlStatus().then((s) => {
       if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
       else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");

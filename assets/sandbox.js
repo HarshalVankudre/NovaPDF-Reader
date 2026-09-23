@@ -122,14 +122,31 @@
     status = null; schemaCache = null; isSnapshot = false; // tables changed
     return j;
   }
+  // The dump->SQLite conversion is best-effort, so run statement by statement:
+  // one MySQL-only statement no longer aborts the whole import — it's skipped
+  // and reported, and everything else still loads.
   async function importSqlite(sql) {
     await ensureSqlite();
-    sqlite.db = new sqlite.SQL.Database(); // clean slate, like the MySQL import
-    sqlite.db.run(sql);
+    const db = new sqlite.SQL.Database(); // clean slate, like the MySQL import
+    const stmts = U.splitStatements(sql, { backslashEscapes: false }); // already SQLite dialect
+    const errors = [];
+    let ok = 0;
+    db.run("BEGIN");
+    for (const st of stmts) {
+      try { db.run(st); ok++; }
+      catch (e) { errors.push({ sql: st, message: (e && e.message) || String(e) }); }
+    }
+    try { db.run("COMMIT"); } catch (e) {}
+    if (!ok && errors.length) {
+      db.close();
+      throw new Error("SQL-Import fehlgeschlagen bei: " + errors[0].sql.slice(0, 90).replace(/\s+/g, " ") + " … → " + errors[0].message);
+    }
+    try { if (sqlite.db) sqlite.db.close(); } catch (e) {}
+    sqlite.db = db;
     schemaCache = null; isSnapshot = false;
     const tables = listSqliteTables();
     lastTableCount = tables.length;
-    return { engine: "sqlite", tables };
+    return { engine: "sqlite", tables, errors };
   }
   function listSqliteTables() {
     try {
@@ -199,14 +216,19 @@
   }
 
   // ---- rendering ----
+  // Rendering a huge result (SELECT * on a 100k-row table) as DOM freezes the
+  // tab, so only the first MAX_SHOWN rows are drawn; the count stays exact.
+  const MAX_SHOWN = 500;
   function setTableHtml(sets) {
     if (!sets || !sets.length) return '<div class="sbx-empty">Kein Ergebnis.</div>';
     return sets.map((s) => {
       const head = "<tr>" + (s.columns || []).map((c) => "<th>" + esc(c) + "</th>").join("") + "</tr>";
-      const body = (s.rows || []).map((row) =>
+      const all = s.rows || [];
+      const body = all.slice(0, MAX_SHOWN).map((row) =>
         "<tr>" + row.map((cell) => "<td>" + (cell == null ? '<span class="sbx-null">NULL</span>' : esc(cell)) + "</td>").join("") + "</tr>"
       ).join("");
-      const count = '<div class="sbx-count">' + (s.rowCount || 0) + " Zeile(n)</div>";
+      const hidden = all.length > MAX_SHOWN ? " · erste " + MAX_SHOWN + " angezeigt" : "";
+      const count = '<div class="sbx-count">' + (s.rowCount || 0) + " Zeile(n)" + hidden + "</div>";
       return '<div class="sbx-set"><div class="sbx-tablewrap"><table class="sbx-table"><thead>' + head + "</thead><tbody>" + body + "</tbody></table></div>" + count + "</div>";
     }).join("");
   }
@@ -303,7 +325,13 @@
     const tabs = (r && r.tables) || [];
     const list = tabs.length ? tabs.map((t) => "<code>" + esc(t.name) + "</code> <span class='sbx-dim'>(" + (t.rows || 0) + ")</span>").join(" · ") : "(keine Tabellen erkannt)";
     const label = r && r.snapshot ? "Snapshot geladen — " + tabs.length + " Tabellen" : "Import ok — " + (r && r.engine === "sqlite" ? "SQLite" : "MySQL");
-    showResult('<div class="sbx-ok">' + label + "</div><div class='sbx-tablelist'>" + list + "</div>");
+    const errs = (r && r.errors) || [];
+    const warn = errs.length
+      ? '<details class="sbx-warn"><summary>⚠ ' + errs.length + " Anweisung(en) übersprungen (SQLite-Dialekt)</summary>" +
+        errs.slice(0, 8).map((e) => "<div><code>" + esc(e.sql.slice(0, 120).replace(/\s+/g, " ")) + "</code><br>→ " + esc(e.message) + "</div>").join("") +
+        (errs.length > 8 ? "<div>… " + (errs.length - 8) + " weitere</div>" : "") + "</details>"
+      : "";
+    showResult('<div class="sbx-ok">' + label + "</div><div class='sbx-tablelist'>" + list + "</div>" + warn);
     if (tabs.length && editorEl && !editorEl.value.trim()) editorEl.value = "SELECT * FROM " + tabs[0].name + " LIMIT 50;";
   }
   async function doImport(fn) {

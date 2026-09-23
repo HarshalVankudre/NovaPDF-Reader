@@ -221,6 +221,10 @@
       const N = this.slides.length;
       this.N = N;
       this.docTokens = new Array(N);
+      this._posCache = new Array(N);
+      this._sumBuf = new Float64Array(N); // search() scratch, zeroed after each use
+      this._maxBuf = new Float64Array(N);
+      this._touched = new Int32Array(N);
       this.docLen = new Float64Array(N);
       const df = new Map();
       const docTermW = new Array(N); // per-doc Map(term -> weighted tf)
@@ -422,8 +426,9 @@
         // Per query token, sum contributions from its variant terms (exact,
         // stem, prefix, synonym) but cap at 1.8x the single best term so one
         // rare repeated word can't dominate a genuine multi-variant match.
-        const tmpSum = new Map();
-        const tmpMax = new Map();
+        // (reused typed-array scratch + touched list instead of per-token Maps)
+        const tmpSum = this._sumBuf, tmpMax = this._maxBuf, touched = this._touched;
+        let nt = 0;
         for (const [term, w] of terms) {
           const idf = this.idf.get(term) || 0;
           const post = this.postings.get(term);
@@ -432,13 +437,16 @@
             const d = post[i][0], f = post[i][1];
             const dl = this.docLen[d];
             const s = (w * idf * (f * (this.k1 + 1))) / (f + this.k1 * (1 - this.b + (this.b * dl) / this.avgdl));
-            tmpSum.set(d, (tmpSum.get(d) || 0) + s);
-            if (s > (tmpMax.get(d) || 0)) tmpMax.set(d, s);
+            if (tmpSum[d] === 0 && tmpMax[d] === 0) touched[nt++] = d;
+            tmpSum[d] += s;
+            if (s > tmpMax[d]) tmpMax[d] = s;
           }
         }
-        for (const [d, sum] of tmpSum) {
-          score[d] += Math.min(sum, tmpMax.get(d) * 1.8);
+        for (let k = 0; k < nt; k++) {
+          const d = touched[k];
+          score[d] += Math.min(tmpSum[d], tmpMax[d] * 1.8);
           mask[d] |= 1 << qi;
+          tmpSum[d] = 0; tmpMax[d] = 0;
         }
       }
 
@@ -468,28 +476,39 @@
           score: sc,
           norm: max > 0 ? sc / max : 0,
           coverage: cov,
-          snippet: this.snippet(s.text, cq),
+          snippet: this.snippet(s.text, cq, undefined, d),
         };
       });
       return { ms: now() - t0, total: cands.length, results, query, compiled: cq };
     }
 
+    // Positioned tokens of a slide's body, tokenized + folded once and cached:
+    // snippet building used to re-tokenize (and NFKD-fold) every result's full
+    // text on every keystroke, which was ~90% of the query time.
+    _posTokens(docId) {
+      let c = this._posCache[docId];
+      if (!c) c = this._posCache[docId] = tokensWithPos(this.slides[docId].text || "");
+      return c;
+    }
+
     /* Best-window plain-text snippet around the densest cluster of hits. */
-    snippet(text, cqOrQuery, maxLen = 230) {
+    snippet(text, cqOrQuery, maxLen = 230, docId) {
       if (!text) return "";
       const cq = typeof cqOrQuery === "string" ? this.compile(cqOrQuery) : cqOrQuery;
-      const toks = tokensWithPos(text);
+      const toks = docId != null ? this._posTokens(docId) : tokensWithPos(text);
       const hitPos = [];
       for (const t of toks) if (cq.hitSet.has(t.folded)) hitPos.push(t.start);
       if (hitPos.length === 0) {
         const cut = text.slice(0, maxLen);
         return cut + (text.length > maxLen ? "…" : "");
       }
+      // densest window [p, p+maxLen]; hitPos is ascending, so a two-pointer
+      // sweep finds the same (first) best start in linear time
       let best = hitPos[0], bestCount = 0;
-      for (const p of hitPos) {
-        let c = 0;
-        for (const q of hitPos) if (q >= p && q <= p + maxLen) c++;
-        if (c > bestCount) { bestCount = c; best = p; }
+      for (let i = 0, j = 0; i < hitPos.length; i++) {
+        if (j < i) j = i;
+        while (j < hitPos.length && hitPos[j] <= hitPos[i] + maxLen) j++;
+        if (j - i > bestCount) { bestCount = j - i; best = hitPos[i]; }
       }
       let start = Math.max(0, best - 36);
       let end = Math.min(text.length, start + maxLen);

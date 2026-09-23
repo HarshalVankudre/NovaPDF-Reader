@@ -512,6 +512,10 @@ body.viewer-only .sidebar { display: none; }
 .sbx-table tr:nth-child(even) td { background: #fbfcfd; }
 .sbx-null { color: var(--muted-2); font-style: italic; }
 .sbx-count { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+.sbx-warn { margin-top: 8px; font-size: 12px; color: #8a5a00; background: #fff6e0; border: 1px solid #f0d9a0; border-radius: 8px; padding: 7px 10px; }
+.sbx-warn summary { cursor: pointer; font-weight: 600; }
+.sbx-warn div { margin-top: 6px; word-break: break-word; }
+.sbx-warn code { font-family: var(--mono); font-size: 11.5px; }
 .sbx-busy .sbx-run { opacity: .6; pointer-events: none; }
 .sbx-fix { margin-top: 8px; }
 .nt-sql-result .sbx-fix { margin: 6px 0 0; padding: 5px 12px; font-size: 12px; }

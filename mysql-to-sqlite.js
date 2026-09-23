@@ -3,9 +3,9 @@
  * mysql-to-sqlite.js — fast one-shot snapshot of a live MySQL/MariaDB database
  * into a single SQLite file that the app loads instantly (no dump parsing).
  *
- * Exam-day usage (give Claude Code the credentials and run this):
- *   node mysql-to-sqlite.js --host db.example.com --user u --password PW --database examdb
- *   node mysql-to-sqlite.js --database examdb            # other values from serve.config.json / env
+ * Usage (give Claude Code the credentials and run this):
+ *   node mysql-to-sqlite.js --host db.example.com --user u --password PW --database mydb
+ *   node mysql-to-sqlite.js --database mydb              # other values from serve.config.json / env
  *
  * TLS (common for remote/cloud MySQL):
  *   --ssl                    enable TLS (system CAs)
@@ -15,8 +15,8 @@
  *
  * Defaults come from serve.config.json's "mysql" block (incl. an optional "ssl"
  * object) and MYSQL_* env vars, so usually you only pass --database (and creds).
- * Output goes to data/exam.sqlite by default, which the app auto-loads on opening
- * the sandbox. (The DB is assumed MySQL/MariaDB — if the exam DB is a SQLite file,
+ * Output goes to data/snapshot.sqlite by default, which the app auto-loads on opening
+ * the sandbox. (The DB is assumed MySQL/MariaDB — if the source DB is a SQLite file,
  * skip this entirely and drag the file into the app. If it's PostgreSQL, ask for a
  * pg variant.)
  *
@@ -110,11 +110,11 @@ async function main() {
     database: args.database || d.database,
     ssl: buildSsl(args, d),
   };
-  const out = path.resolve(root, args.out || path.join("data", "exam.sqlite"));
+  const out = path.resolve(root, args.out || path.join("data", "snapshot.sqlite"));
   if (!conf.database) {
     console.error(
       "Missing --database (the MySQL schema to snapshot). Examples:\n" +
-      "  node mysql-to-sqlite.js --host db.example.com --user u --password PW --database examdb\n" +
+      "  node mysql-to-sqlite.js --host db.example.com --user u --password PW --database mydb\n" +
       "  node mysql-to-sqlite.js --host ... --user ... --password ... --database ... --ssl            (TLS)\n" +
       "  node mysql-to-sqlite.js --host ... --user ... --password ... --database ... --ssl-ca ca.pem  (TLS + CA file)\n" +
       "  add --ssl-insecure if the server uses a self-signed cert");

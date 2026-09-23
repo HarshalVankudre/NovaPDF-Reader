@@ -1,6 +1,6 @@
 /* ============ SQL sandbox ============
- * A query console over the imported exam database. Two engines, auto-selected:
- *   - MySQL  : the local server's /sql bridge (exam-exact dialect). Preferred.
+ * A query console over the imported database. Two engines, auto-selected:
+ *   - MySQL  : the local server's /sql bridge (dialect-exact). Preferred.
  *   - SQLite : in-browser sql.js (WASM), offline fallback when MySQL is down.
  * Import accepts a mysqldump / plain SQL script, or CSV-per-table. The AI's
  * generated SQL gets a Run button that executes here against the imported data.
@@ -77,7 +77,7 @@
     const files = Array.from(fileList || []);
     if (!files.length) return;
     const bufs = await Promise.all(files.map((f) => f.arrayBuffer()));
-    // A binary SQLite file (the exam snapshot) loads directly — instant, exact, no parsing.
+    // A binary SQLite file (the snapshot) loads directly — instant, exact, no parsing.
     for (let i = 0; i < files.length; i++) if (isSqliteBytes(bufs[i])) return loadSqliteBytes(bufs[i], files[i].name);
     const parsed = files.map((f, i) => ({ name: f.name, text: new TextDecoder().decode(bufs[i]) }));
     return importParsed(parsed);
@@ -92,13 +92,13 @@
     lastTableCount = tables.length;
     return { engine: "sqlite", snapshot: true, tables };
   }
-  // Fetch + load the server-side snapshot file (data/exam.sqlite by default).
+  // Fetch + load the server-side snapshot file (data/snapshot.sqlite by default).
   async function loadSnapshot() {
     const r = await fetch("/sql/file", { cache: "no-store" });
-    if (!r.ok) throw new Error("Keine Snapshot-Datei gefunden (data/exam.sqlite)");
+    if (!r.ok) throw new Error("Keine Snapshot-Datei gefunden (data/snapshot.sqlite)");
     const buf = await r.arrayBuffer();
     if (!isSqliteBytes(buf)) throw new Error("Datei ist keine gültige SQLite-DB");
-    return loadSqliteBytes(buf, "exam.sqlite");
+    return loadSqliteBytes(buf, "snapshot.sqlite");
   }
   async function snapshotStatus() {
     try { const r = await fetch("/sql/filestatus", { cache: "no-store" }); return await r.json(); }
@@ -232,7 +232,7 @@
       const n = (status && status.tables && status.tables.length) || 0;
       engineEl.className = "sbx-engine ok";
       engineEl.innerHTML = "MySQL ✓ <small>" + esc((status && status.database) || "") + " · " + n + " Tab.</small>";
-      engineEl.title = "Exam-genau (lokale MySQL). Klicken: zu SQLite wechseln.";
+      engineEl.title = "Exakt (lokale MySQL). Klicken: zu SQLite wechseln.";
     } else if (isSnapshot) {
       engineEl.className = "sbx-engine ok";
       engineEl.innerHTML = "SQLite ✓ <small>Snapshot · " + lastTableCount + " Tab.</small>";
@@ -262,7 +262,7 @@
       '<div class="sbx-tools">' +
       '<button class="sbx-btn sbx-run">Ausführen ▷</button>' +
       '<button class="sbx-btn sbx-ghost sbx-copy" title="SQL in die Zwischenablage kopieren">Kopieren ⧉</button>' +
-      '<button class="sbx-btn sbx-ghost sbx-snap" hidden>Exam-DB laden</button>' +
+      '<button class="sbx-btn sbx-ghost sbx-snap" hidden>Snapshot laden</button>' +
       '<button class="sbx-btn sbx-ghost sbx-import">Als DB importieren</button>' +
       '<label class="sbx-btn sbx-ghost sbx-file">Datei…<input type="file" multiple accept=".sqlite,.sqlite3,.db,.sql,.csv,.txt" hidden></label>' +
       '<span class="sbx-hint">.sqlite / Dump / CSV hierher ziehen · Strg+Enter</span></div>' +
@@ -409,12 +409,12 @@
     backdrop.hidden = false; panel.hidden = false;
     if (!booted) { booted = true; ensureEngine().then(updateEngineBadge).catch(() => { updateEngineBadge(); }); }
     else updateEngineBadge();
-    // Surface the exam snapshot if the server has one; auto-load it once so the
-    // 5-minute window is just "run mysql-to-sqlite.js → open → query".
+    // Surface the snapshot if the server has one; auto-load it once so the
+    // flow is just "run mysql-to-sqlite.js → open → query".
     snapshotStatus().then((st) => {
       const snapBtn = panel.querySelector(".sbx-snap");
       if (st && st.exists) {
-        if (snapBtn) { snapBtn.hidden = false; snapBtn.textContent = "Exam-DB laden" + (st.size ? " (" + Math.max(1, Math.round(st.size / 1024)) + " KB)" : ""); }
+        if (snapBtn) { snapBtn.hidden = false; snapBtn.textContent = "Snapshot laden" + (st.size ? " (" + Math.max(1, Math.round(st.size / 1024)) + " KB)" : ""); }
         if (!autoTried && !isSnapshot) { autoTried = true; doImport(loadSnapshot); }
       } else if (snapBtn) { snapBtn.hidden = true; }
     }).catch(() => {});

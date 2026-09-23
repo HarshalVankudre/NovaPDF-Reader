@@ -31,7 +31,7 @@ assert.doesNotMatch(app, /history\.concat/, "no request may carry prior Q/A pair
 // paste can NEVER reach the tutor — the paste-to-ask feature is fully removed
 // (a lingering localStorage flag from old builds must not resurrect it either)
 assert.doesNotMatch(app, /autoAsk/, "paste-to-ask must not exist at all");
-assert.doesNotMatch(app, /looksLikeExamQuestion/, "the exam-task paste heuristic must be gone");
+assert.doesNotMatch(app, /looksLike\w*Question/, "the paste-task detection heuristic must be gone");
 assert.match(app, /localStorage\.removeItem\("aiAutoAsk"\)/, "the old paste-to-ask flag must be purged at startup");
 assert.match(app, /localStorage\.getItem\("aiCheck"\) === "1"/, "Gegenprüfung must stay off unless :check stored an explicit on");
 assert.match(app, /document\.addEventListener\("paste"/, "paste should still attach/search anywhere in the app");

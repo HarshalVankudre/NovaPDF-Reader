@@ -228,11 +228,11 @@ const CHAT_SYSTEM =
   'You are the course notes ("Notizen") for the German university database course ' +
   '"DSCB140 - Datenbanken & Datenkunde" (lectures VL1-VL7, 317 slides with global slide numbers). ' +
   'Context that may accompany a question: slide excerpts as text, the most relevant slides as images ' +
-  '(each labeled "Bild von Folie N"), a pasted exam screenshot, attached files (e.g. .sql), the imported ' +
+  '(each labeled "Bild von Folie N"), a pasted screenshot, attached files (e.g. .sql), the imported ' +
   'database schema with its SQL dialect, and earlier notes of this thread.\n' +
   '\n' +
   'PRECISION\n' +
-  '- A typed or pasted exam task (text or screenshot) is the PRIMARY object: read it completely and solve ' +
+  '- A typed or pasted task (text or screenshot) is the PRIMARY object: read it completely and solve ' +
   'EVERY sub-task (a, b, c, ...). Slides are supporting reference material, not the subject.\n' +
   '- COMPLETENESS IS MANDATORY: first identify every part of the task - every sub-question, every explicitly ' +
   'requested deliverable, every condition ("alle Spalten", "beide Richtungen", "nennen Sie drei", ...) - then ' +
@@ -305,7 +305,7 @@ function toOpenAIMessages(messages) {
 // that phase room. Depth is set by REASONING_EFFORT, not a token budget
 // (budget_tokens is removed on Fable 5/Opus 4.8; adaptive thinking + effort replaces it).
 const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
-const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day)
+const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost
 // Fable 5's safety classifiers can (rarely) decline a request with
 // stop_reason "refusal" instead of an HTTP error. The server-side fallback
 // re-runs the same request on Opus 4.8 inside the same call, so the tutor
@@ -422,7 +422,7 @@ function normalizeProvider(name) {
 // Try each provider in the chain until one starts streaming tokens. A provider
 // that fails BEFORE emitting a token (error, 5xx, or first-token timeout) is
 // skipped and the next is tried; once tokens have been written we commit to that
-// provider (we can't un-send a partial answer). This is the exam-day safety net.
+// provider (we can't un-send a partial answer). This is the streaming safety net.
 async function streamWithFallback(payload, res) {
   const messages = payload.messages;
   const effort = normalizeEffort(payload && payload.effort);
@@ -455,8 +455,8 @@ async function streamWithFallback(payload, res) {
 }
 
 // ===================== SQL sandbox (local MySQL bridge) =====================
-// Exam-day workflow: the student gets the DB ~5 min before, exports a dump, and
-// imports it here. Queries run against the real local MySQL (exam-exact dialect).
+// Typical workflow: the user exports a dump of the DB and imports it here.
+// Queries run against the real local MySQL (dialect-exact).
 // mysql2 is pure-JS and optional — if it's missing or MySQL is unreachable, the
 // browser silently falls back to an in-browser SQLite sandbox.
 let mysql2Lib = null;
@@ -477,10 +477,10 @@ const MYSQL_CFG = (() => {
 })();
 const baseConn = () => ({ host: MYSQL_CFG.host, port: MYSQL_CFG.port, user: MYSQL_CFG.user, password: MYSQL_CFG.password, connectTimeout: 4000 });
 
-// Exam snapshot: a prebuilt SQLite file (from mysql-to-sqlite.js) the app auto-loads.
+// Snapshot: a prebuilt SQLite file (from mysql-to-sqlite.js) the app auto-loads.
 const SNAPSHOT_PATH = process.env.SLIDEFINDER_SQLITE
   ? path.resolve(process.env.SLIDEFINDER_SQLITE)
-  : ((CONFIG && CONFIG.sqliteSnapshot) ? path.resolve(ROOT, CONFIG.sqliteSnapshot) : path.join(ROOT, "data", "exam.sqlite"));
+  : ((CONFIG && CONFIG.sqliteSnapshot) ? path.resolve(ROOT, CONFIG.sqliteSnapshot) : path.join(ROOT, "data", "snapshot.sqlite"));
 
 let mysqlPool = null;
 function getPool() {
@@ -756,7 +756,7 @@ if (require.main === module) {
     console.log(`serving ${ROOT}`);
     console.log("LLM key present: opus=" + !!KEYS.opus);
     mysqlStatus().then((s) => {
-      if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
+      if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — dialect-exact path ready");
       else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");
       try { const st = fs.statSync(SNAPSHOT_PATH); console.log("SQL snapshot: " + path.basename(SNAPSHOT_PATH) + " present (" + Math.round(st.size / 1024) + " KB) — app auto-loads it"); }
       catch (e) { console.log("SQL snapshot: none yet — run `node mysql-to-sqlite.js --database <db>` to create " + path.relative(ROOT, SNAPSHOT_PATH)); }

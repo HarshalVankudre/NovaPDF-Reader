@@ -44,7 +44,7 @@ const CASES = [
   { q: "Wie verhindere ich doppelte Werte in einer Spalte?", expect: [[103, 118], [181, 181], [279, 290]], top: 3 },
   { q: "Spalte darf nicht leer sein", expect: [[111, 119], [169, 195], [279, 290]], top: 3 },
   { q: "Durchschnitt pro Produktkategorie berechnen", expect: [[228, 271]], top: 3 },
-  // --- exam-topic coverage, phrase ordering, and SQL-keyword search (added) ---
+  // --- topic coverage, phrase ordering, and SQL-keyword search (added) ---
   { q: "INNER JOIN", expect: [[247, 260]] },
   { q: "LEFT OUTER JOIN", expect: [[247, 260]] },
   { q: "kartesisches Produkt", expect: [[238, 260]] },

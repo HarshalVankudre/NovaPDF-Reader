@@ -93,7 +93,7 @@
     ["andern", "bearbeiten", "anpassen"],
     ["index", "schneller", "performance", "beschleunigen", "suchbaum"],
 
-    // --- more exam concepts (VL3 modeling, VL6 DQL, VL7 integrity/transactions) ---
+    // --- more course concepts (VL3 modeling, VL6 DQL, VL7 integrity/transactions) ---
     ["having", "gruppenbedingung", "gruppenebene"],
     ["distinct", "eindeutige", "ohnedoppelte", "verschiedene"],
     ["limit", "begrenzen", "obergrenze", "topn"],

@@ -726,7 +726,7 @@
     for (const f of imgBlobs) {
       if (pendingImages.length >= 4) break;
       // 2400px keeps even high-DPI screenshots under Fable 5's 2576px vision
-      // limit without the API downscaling them — small exam text stays readable
+      // limit without the API downscaling them — small text stays readable
       try { pendingImages.push(await processImageBlob(f, 2400)); } catch (err) {}
     }
     for (const f of textBlobs) {
@@ -794,7 +794,7 @@
   }
 
   // POST to the tutor endpoint with one silent retry when nothing has been
-  // received yet (exam-day resilience: a flaky first connection self-heals).
+  // received yet (resilience: a flaky first connection self-heals).
   async function postQ(messages, effort) {
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -834,7 +834,7 @@
   // than one). On agreement a subtle "✓✓" chip appears. On DISAGREEMENT a
   // strict third arbiter solve decides 2-of-3 — so a wrong "correction" can't
   // flip a right answer (the classic self-correction failure on multiple
-  // choice). If the answer contains read-only SQL and an exam DB is loaded,
+  // choice). If the answer contains read-only SQL and a DB is loaded,
   // the checker additionally receives the REAL execution result as evidence.
   // Runs detached: never blocks or disturbs the visible answer. :check toggles.
   const CHECK_LABEL = {
@@ -961,7 +961,7 @@
     const files = pendingFiles.slice();              // .sql/text files the user pasted
     if ((!q && !imgs.length && !files.length) || !engine) return;
     if (aiStreaming) {
-      // rapid-fire exam flow: questions pasted while one is streaming queue up
+      // rapid-fire flow: questions pasted while one is streaming queue up
       // and fire automatically as soon as the current answer is done
       askQueue.push({ q: q, imgs: imgs, files: files });
       qInput.value = ""; clearBtn.hidden = true;
@@ -989,7 +989,7 @@
         // Which slides go along as IMAGES: the top-ranked ones, plus any near-top
         // slide whose extracted text is so thin its content must live in the
         // graphics (ER diagram, table screenshot). :fast turns images off.
-        // PASTED exam tasks (long q) are self-contained — slide images only pay
+        // PASTED tasks (long q) are self-contained — slide images only pay
         // off when the slides genuinely match, so weak matches skip the whole
         // render+upload+vision cost (several seconds) and strong matches send
         // just the single best slide as grounding.
@@ -1168,7 +1168,7 @@
       persistThread();
       const doc = aiPanel.querySelector("#ntDoc");
       if (doc) doc.scrollTop = doc.scrollHeight;
-      if (askQueue.length) { // fire the next queued exam question automatically
+      if (askQueue.length) { // fire the next queued question automatically
         const nxt = askQueue.shift();
         qInput.value = nxt.q || "";
         pendingImages = nxt.imgs;
@@ -1379,7 +1379,7 @@
       a.addEventListener("mouseleave", hideRefPreview);
     });
   }
-  // Auto-run the tutor's SQL when it is provably read-only and an exam DB is
+  // Auto-run the tutor's SQL when it is provably read-only and a DB is
   // loaded — the result table appears under the answer without any click.
   // Writes NEVER auto-run (WITH … DELETE included); :auto toggles the feature.
   const READONLY_SQL = /^(select|with|show|describe|desc|explain)\b/i;

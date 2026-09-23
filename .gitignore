@@ -10,8 +10,8 @@ _*.png
 # build artifacts (packaged .exe + release zips)
 dist/
 
-# exam SQL snapshot (private data, regenerated on the day)
-data/exam.sqlite
+# SQL snapshot (private data, regenerated as needed)
+data/snapshot.sqlite
 *.sqlite
 *.sqlite3
 .vercel

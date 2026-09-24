@@ -13,6 +13,7 @@ node serve.js                          # run the app → http://localhost:8000 (
 npm test                               # runs all 6 node test suites (see below); exits non-zero on any failure
 node mysql-to-sqlite.js --database DB  # snapshot a live MySQL DB → data/exam.sqlite (the app auto-loads it)
 node tests/engine.test.js              # just the search-engine ranking checks + latency benchmark
+npm run test:e2e                       # browser e2e: Chromium -> serve.js -> SDK -> mock Anthropic API (free); E2E_LIVE=1 uses the real API
 python build_index.py                  # rebuild data/slides.json from the source PDFs (needs PyMuPDF or pypdf)
 npm install                            # installs deps: mysql2 (pure-JS), sql.js (WASM)
 ```
@@ -20,6 +21,7 @@ npm install                            # installs deps: mysql2 (pure-JS), sql.js
 - Must be served over **http** — opening `index.html` via `file://` is blocked by the browser and shows a help screen instead.
 - `npm test` runs `engine` + `llm-config` + `client-provider` + `sql-util` + `stream` + `server` suites. `tests/engine.test.js` checks ranked results against ground-truth page ranges and **exits non-zero if any ranking check fails**, so it's the regression gate when changing the engine. `tests/sql-util.test.js` covers the mysqldump→SQLite cleaning; `tests/stream.test.js` covers the tutor stream retry / client-disconnect logic with a fake streamer (no network).
 - After editing client-side JS, reload the page. Static files are served `no-cache` with an ETag, so a normal reload revalidates (304 when unchanged, the new file when edited); Ctrl+Shift+R still works if in doubt.
+- `npm run test:e2e` (`tests/e2e.test.js`, not part of `npm test`) drives the real app in Chromium against a spawned `serve.js` and a generated SQLite snapshot. By default the SDK is pointed (`ANTHROPIC_BASE_URL`) at an in-process mock of the Anthropic API that records every request and streams scripted SSE, so it asserts the exact request (model, effort, thinking, fallback beta, slides/images/schema) plus search, sandbox, streaming, citation checks, SQL auto-run, the overload retry, and `:stop`/`:new` aborting upstream. `E2E_LIVE=1` runs the same flow against the real API with `ANTHROPIC_API_KEY` (about 5 paid requests at high effort) and checks outcomes instead of exact text. Needs Playwright + Chromium (`npm i -g playwright`, run with `NODE_PATH=$(npm root -g)`; `CHROMIUM_PATH` to reuse a browser).
 - **Never** serve this with Python's `http.server`: it drops/empties large files on Windows and breaks PDF loading. Use the bundled `serve.js`.
 
 ## API keys & config

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "test": "node tests/engine.test.js && node tests/llm-config.test.js && node tests/client-provider.test.js && node tests/sql-util.test.js && node tests/stream.test.js && node tests/server.test.js",
+    "test:e2e": "node tests/e2e.test.js",
     "snapshot": "node mysql-to-sqlite.js",
     "build:exe": "pkg . --output dist/NovaPDF-Reader.exe"
   },

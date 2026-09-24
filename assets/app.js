@@ -630,6 +630,8 @@
   let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in
   let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
   let askCtrl = null;       // aborts the in-flight answer (:stop, :new) — the server then stops the upstream generation too
+  let waitTimer = null;     // elapsed-seconds counter shown until the first text arrives
+  function stopWaitTimer() { if (waitTimer) { clearInterval(waitTimer); waitTimer = null; } }
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
   let pendingFiles = [];    // pasted text/SQL files queued for the next ask {name,text,truncated}
@@ -1142,6 +1144,14 @@
       const shadowPromise = wantCheck ? postQ(messages, undefined, ctrl.signal).then(readAll).catch(() => null) : null;
 
       assistantTurn = aiThread[aiThread.length - 1];
+      // Hard tasks can think for a minute or more before the first word: show
+      // a quiet elapsed-seconds counter next to the caret until text arrives.
+      const t0 = Date.now();
+      waitTimer = setInterval(() => {
+        const sec = Math.round((Date.now() - t0) / 1000);
+        if (acc || !streamBodyEl || sec < 3) return;
+        streamBodyEl.innerHTML = '<span class="nt-caret"></span><span class="nt-wait">' + sec + " s</span>";
+      }, 1000);
       let pending = false;
       const flush = () => {
         pending = false;
@@ -1159,6 +1169,7 @@
         const { done, value } = await reader.read();
         if (done) break;
         acc += dec.decode(value, { stream: true });
+        if (acc) stopWaitTimer();
         assistantTurn.content = acc;
         if (!pending) { pending = true; requestAnimationFrame(flush); }
       }
@@ -1198,6 +1209,7 @@
         showAiToast("Fehler");
       }
     } finally {
+      stopWaitTimer();
       if (askCtrl === ctrl) askCtrl = null;
       setAiBusy(false);
       persistThread();

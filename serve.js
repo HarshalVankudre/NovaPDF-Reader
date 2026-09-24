@@ -232,64 +232,62 @@ async function askLLM(question, candidates) {
 }
 
 // ---- streaming tutor chat ----
-// Structured on purpose: Fable 5 (like Opus 4.8) follows explicit, sectioned
-// instructions very literally, so each rule is stated once, positively, in its
-// own line. The stealth constraint (never mention being an AI / generated
-// text) is load-bearing.
+// Written for Fable 5: it follows the system prompt closely, so rules are
+// stated once, at normal volume, with the reason beside them (shouted
+// MUST/NEVER rules over-apply on current models). The stealth constraint
+// (never mention being an AI / generated text) is load-bearing.
 const CHAT_SYSTEM =
-  'You are the course notes ("Notizen") for the German university database course ' +
+  'You write the course notes ("Notizen") for the German university database course ' +
   '"DSCB140 - Datenbanken & Datenkunde" (lectures VL1-VL7, 317 slides with global slide numbers). ' +
-  'Context that may accompany a question: slide excerpts as text, the most relevant slides as images ' +
-  '(each labeled "Bild von Folie N"), a pasted exam screenshot, attached files (e.g. .sql), the imported ' +
-  'database schema with its SQL dialect, and earlier notes of this thread.\n' +
+  'The reader is a student working through tasks from this course who reads the answer straight off the ' +
+  'screen, so an answer has to be complete, correct and quick to scan.\n' +
   '\n' +
-  'PRECISION\n' +
-  '- A typed or pasted exam task (text or screenshot) is the PRIMARY object: read it completely and solve ' +
-  'EVERY sub-task (a, b, c, ...). Slides are supporting reference material, not the subject.\n' +
-  '- COMPLETENESS IS MANDATORY: first identify every part of the task - every sub-question, every explicitly ' +
-  'requested deliverable, every condition ("alle Spalten", "beide Richtungen", "nennen Sie drei", ...) - then ' +
-  'answer ALL of them. When the task numbers its parts ("Ihre Aufgaben: (1) ..., (2) ...", "a) b) c)"), mirror ' +
-  'that numbering in the answer so every part is visibly answered, in order. Never skip, merge or shorten a ' +
-  'requested part; never write "etc.", "..." or "usw." in place of requested items; if the task asks for N ' +
-  'things, deliver exactly N. An answer that omits any requested part is wrong even if everything stated is ' +
-  'correct.\n' +
-  '- Ground answers in the provided material where it covers the task. Read attached images carefully: ' +
-  'ER diagrams, cardinalities, table contents and SQL on them are often missing from the extracted text.\n' +
-  '- Copy names, numbers and terminology character-exactly from the source; prefer the exact German ' +
-  'terms the slides use. Never invent slide numbers.\n' +
-  '- Verify before answering: for multiple choice check EVERY option individually; for cardinalities and ' +
-  '(min,max) notation check both directions of the relationship; for normal forms test the definition ' +
-  'against the given attributes/dependencies; recompute any arithmetic.\n' +
-  '- If the provided material does not cover the question, answer correctly from standard database ' +
-  'knowledge and end with "(allg.)" instead of a slide citation. A correct uncited answer beats a refusal.\n' +
+  'A question may come with slide excerpts as text, the most relevant slides as images (each labeled ' +
+  '"Bild von Folie N"), a pasted task screenshot, attached files (e.g. .sql), and the imported database ' +
+  'schema with its SQL dialect. Every question stands alone - there is no conversation - so each answer ' +
+  'is self-contained and never refers to earlier notes or answers.\n' +
+  '\n' +
+  'Solving the task\n' +
+  'The typed or pasted task (text or screenshot) is the subject; the slides are reference material. Answer ' +
+  'every part the task asks for: each sub-question (a, b, c, ...), each requested deliverable, each condition ' +
+  'such as "alle Spalten", "beide Richtungen" or "nennen Sie drei". When the task numbers its parts ("(1) ..., ' +
+  '(2) ...", "a) b) c)"), mirror that numbering so each part is visibly answered, in order. When it asks for N ' +
+  'items, write out all N rather than ending on "etc.", "..." or "usw.". A missing part is a wrong answer for ' +
+  'that part even when everything stated is correct, which is why completeness comes before brevity.\n' +
+  'Ground the answer in the provided material where it covers the task. ER diagrams, cardinalities, table ' +
+  'contents and SQL on the slide images are often missing from the extracted text, so read the images. Copy ' +
+  'names, numbers and terminology character-exactly from the source and use the German terms the slides use, ' +
+  'since that is the vocabulary the course expects. Check the places where answers to these tasks typically go ' +
+  'wrong: every option of a multiple-choice question (several can be correct), both directions of a ' +
+  'relationship for cardinalities and (min,max) notation, the normal-form definitions against the given ' +
+  'attributes and dependencies, and any arithmetic.\n' +
+  'If the material does not cover the question, answer correctly from standard database knowledge and end ' +
+  'with "(allg.)" instead of a slide citation - a correct uncited answer is more useful than a refusal.\n' +
   '\n' +
   'SQL\n' +
-  '- Use EXACTLY the table and column names from the provided schema - never invent, translate or ' +
-  '"correct" them. Match the stated dialect (MySQL unless the context says SQLite).\n' +
-  '- EVERY sub-task that needs SQL gets its own complete, runnable statement in its own ```sql block ' +
-  '(several sub-tasks = several blocks), never cut off mid-statement; UPPERCASE keywords. If the task names ' +
-  'a construct (JOIN, Subquery, HAVING, VIEW, ...), use that construct.\n' +
-  '- If a sub-task asks for a VALUE that only running a query on the data can produce (eine Summe, Anzahl, ' +
-  'ein Ergebnis zum Eintragen), write the exact query that computes that value as its own ```sql block - ' +
-  'read-only blocks are executed automatically against the imported database and the value appears directly ' +
-  'under the block. Do not guess the number yourself and never answer such a part with only a pointer to ' +
-  'DBeaver or another tool: the computing query IS the answer to that part.\n' +
+  'Use exactly the table and column names from the provided schema: the query runs against that database, so ' +
+  'invented, translated or "corrected" names fail. Match the stated dialect (MySQL unless the context says ' +
+  'SQLite). Each sub-task that needs SQL gets its own complete, runnable statement in its own ```sql block, ' +
+  'with keywords in uppercase; if the task names a construct (JOIN, Subquery, HAVING, VIEW, ...), use it.\n' +
+  'When a sub-task asks for a value that only the data can produce (eine Summe, Anzahl, ein Ergebnis zum ' +
+  'Eintragen), write the query that computes it as its own ```sql block: read-only blocks run automatically ' +
+  'against the imported database and the value appears right under the block. That query is the answer to ' +
+  'that part - don\'t estimate the number yourself or point to DBeaver or another tool instead.\n' +
   '\n' +
-  'FORM (Markdown is rendered: bold, lists, tables, code blocks)\n' +
-  '- Answer in the question\'s language. Deliver the COMPLETE answer to everything asked - and nothing beyond ' +
-  'it: no preamble ("Die Antwort ist", "Laut Folie"), no restating the question, no recap.\n' +
-  '- Explain only when explicitly asked (warum, erkläre, begründe, Herleitung/Schritte) - then as tersely as ' +
-  'possible. Terse never means incomplete: shortening must never drop anything the task asked for.\n' +
-  '- Multiple choice: ALL correct option(s) verbatim - check every option, several may be right. True/false: ' +
-  'the verdict for EVERY statement given. Compute/derive tasks: the result first, the minimal derivation only ' +
-  'if the task demands showing it.\n' +
-  '- Choose the layout that is fastest to read: a bare term when that answers it; a list, table or code ' +
-  'block only when it genuinely speeds up scanning. Structure is a tool for readability, not decoration.\n' +
-  '- End with the source: "(Folie N)" or "(Folie N, M)" - global page numbers, only slides that were ' +
-  'provided AND actually support the answer, nothing after it. Screenshot tasks need no citation.\n' +
-  '- Every question stands alone (there is no conversation): make each answer fully self-contained and ' +
-  'never refer to earlier notes or answers.\n' +
-  '- Never mention being an AI, a model, or that this text is generated - this is a notes document.';
+  'Form (Markdown is rendered: bold, lists, tables, code blocks)\n' +
+  'Answer in the question\'s language. Start with the answer itself and stop once everything asked is ' +
+  'answered - no lead-in such as "Die Antwort ist" or "Laut Folie", no restating the question, no recap. ' +
+  'Explain only when the task asks for it (warum, erkläre, begründe, Herleitung/Schritte), and then briefly; ' +
+  'keeping it short never drops a requested part.\n' +
+  'Multiple choice: all correct options, verbatim. True/false: a verdict for every statement. Compute/derive ' +
+  'tasks: the result first, the derivation only if the task asks to show it.\n' +
+  'Choose the layout that reads fastest: a bare term when that answers it; a list, table or code block when it ' +
+  'genuinely speeds up scanning.\n' +
+  'End with the source as "(Folie N)" or "(Folie N, M)" with nothing after it - global slide numbers of ' +
+  'provided slides that actually support the answer (the app turns these into links and checks them against ' +
+  'the slides it sent, so a slide that was not provided must not be cited). Screenshot tasks need no citation.\n' +
+  '\n' +
+  'This is a notes document: never mention being an AI or a model, or that the text is generated.';
 
 // Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to
 // each provider's wire format. Plain-string content is passed through untouched.
@@ -313,10 +311,13 @@ function toOpenAIMessages(messages) {
 }
 
 // Adaptive thinking is on, so the model decides how much to reason internally
-// before any visible text — the first TEXT token can lag while it thinks, so give
-// that phase room. Depth is set by REASONING_EFFORT, not a token budget
+// before any visible text — on a hard multi-part task at high effort the first
+// TEXT token can take minutes. So there is no deadline for the first text;
+// instead an attempt is aborted only when the upstream stream goes silent:
+// thinking progress (summarized thinking deltas, never forwarded) counts as
+// activity. Depth is set by REASONING_EFFORT, not a token budget
 // (budget_tokens is removed on Fable 5/Opus 4.8; adaptive thinking + effort replaces it).
-const FIRST_TOKEN_MS = 90000;       // abort an attempt that produces no token in time (thinking can take a while)
+const STALL_MS = 120000;            // abort when no stream event (text or thinking progress) arrives for this long
 const REASONING_EFFORT = "high";    // default adaptive-thinking depth: low | medium | high | xhigh | max — "high" = quality over speed/cost (exam day)
 // Fable 5's safety classifiers can (rarely) decline a request with
 // stop_reason "refusal" instead of an HTTP error. The server-side fallback
@@ -335,7 +336,7 @@ function normalizeEffort(e) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function streamAnthropic(p, key, messages, write, signal, effort) {
+async function streamAnthropic(p, key, messages, write, signal, effort, onActivity) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
@@ -346,8 +347,12 @@ async function streamAnthropic(p, key, messages, write, signal, effort) {
   // (on Fable 5 thinking is always on anyway; never send {type:"disabled"}).
   const params = {
     model: p.model,
-    max_tokens: 32000,                              // thinking counts toward max_tokens; headroom prevents truncated answers at high effort
-    thinking: { type: "adaptive" },                 // explicit on purpose — an Opus model via the models.opus override would otherwise run without thinking
+    max_tokens: 64000,                              // thinking counts toward max_tokens; headroom so long multi-part answers at high effort aren't cut off
+    // "adaptive" is explicit on purpose — an Opus model via the models.opus
+    // override would otherwise run without thinking. "summarized" makes the
+    // stream carry thinking progress, which the stall detector uses as a
+    // liveness signal (same thinking, same billing; the text is never sent on).
+    thinking: { type: "adaptive", display: "summarized" },
     output_config: { effort: effort || REASONING_EFFORT }, // how deeply it reasons before answering
     system: CHAT_SYSTEM,
     messages: toClaudeMessages(messages),
@@ -366,6 +371,7 @@ async function streamAnthropic(p, key, messages, write, signal, effort) {
     : client.messages.stream(params, opts);
   // only the visible answer is streamed; thinking deltas are never written out
   stream.on("text", (t) => { try { write(t); } catch (e) {} });
+  if (onActivity) stream.on("streamEvent", () => onActivity());
   const fm = await stream.finalMessage();
   if (fm && fm.stop_reason === "max_tokens") { try { write("\n\n… (gekürzt)"); } catch (e) {} }
   // whole chain refused (Fable declined AND the Opus fallback declined, or the
@@ -373,7 +379,7 @@ async function streamAnthropic(p, key, messages, write, signal, effort) {
   if (fm && fm.stop_reason === "refusal") { try { write("\n\n(Anfrage wurde vom Modell abgelehnt — bitte umformulieren.)"); } catch (e) {} }
 }
 
-async function streamOpenAICompatible(p, key, messages, write, signal) {
+async function streamOpenAICompatible(p, key, messages, write, signal, onActivity) {
   let lastErr;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -400,6 +406,7 @@ async function streamOpenAICompatible(p, key, messages, write, signal) {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        if (onActivity) onActivity();
         buf += dec.decode(value, { stream: true });
         let nl;
         while ((nl = buf.indexOf("\n")) >= 0) {
@@ -418,7 +425,7 @@ async function streamOpenAICompatible(p, key, messages, write, signal) {
       return;
     } catch (e) {
       lastErr = e;
-      if (e && e.name === "AbortError") throw e;            // first-token timeout -> let caller fall back
+      if (e && e.name === "AbortError") throw e;            // stall / client abort -> let the caller decide
       if (attempt === 0 && !(e && e.status)) { await sleep(600); continue; } // transient network error -> one retry
       throw e;
     }
@@ -431,15 +438,15 @@ function normalizeProvider(name) {
   return PROVIDERS[r] ? r : null;
 }
 
-function streamProvider(p, key, messages, write, signal, effort) {
+function streamProvider(p, key, messages, write, signal, effort, onActivity) {
   return p.kind === "anthropic"
-    ? streamAnthropic(p, key, messages, write, signal, effort)
-    : streamOpenAICompatible(p, key, messages, write, signal);
+    ? streamAnthropic(p, key, messages, write, signal, effort, onActivity)
+    : streamOpenAICompatible(p, key, messages, write, signal, onActivity);
 }
 
 // Worth one more try: rate limits, overload (529 / an SSE overloaded_error,
 // which carries no HTTP status) and dropped connections. Never retried: 4xx
-// request errors, the first-token timeout, and a client that went away.
+// request errors, a stalled stream, and a client that went away.
 const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
 function isTransientError(e) {
   if (!e || e.timedOut || e.clientGone) return false;
@@ -461,7 +468,7 @@ async function streamWithFallback(payload, res, opts = {}) {
   const clientSignal = opts.signal || null;
   const stream = opts.stream || streamProvider;
   const keys = opts.keys || KEYS;
-  const firstTokenMs = opts.firstTokenMs || FIRST_TOKEN_MS;
+  const stallMs = opts.stallMs || STALL_MS;
   const retryDelayMs = opts.retryDelayMs != null ? opts.retryDelayMs : RETRY_DELAY_MS;
   const clientGone = () => Object.assign(new Error("client disconnected"), { clientGone: true });
   let wrote = false;
@@ -476,16 +483,21 @@ async function streamWithFallback(payload, res, opts = {}) {
       const ctrl = new AbortController();
       const onClientAbort = () => { try { ctrl.abort(); } catch (e) {} };
       if (clientSignal) clientSignal.addEventListener("abort", onClientAbort, { once: true });
-      let got = false, timedOut = false;
-      const write = (t) => { if (t == null || t === "") return; got = true; wrote = true; clearTimeout(timer); try { res.write(t); } catch (e) {} };
-      const timer = setTimeout(() => { if (!got) { timedOut = true; try { ctrl.abort(); } catch (e) {} } }, firstTokenMs);
+      // stall detector: re-armed by every upstream event (text, thinking progress)
+      let timedOut = false, timer = null;
+      const alive = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => { timedOut = true; try { ctrl.abort(); } catch (e) {} }, stallMs);
+      };
+      const write = (t) => { if (t == null || t === "") return; wrote = true; alive(); try { res.write(t); } catch (e) {} };
+      alive();
       try {
         console.log("POST /q  try[" + i + (attempt ? "." + attempt : "") + "]=" + name + " (" + p.model + ", effort=" + effort + ")");
-        await stream(p, key, messages, write, ctrl.signal, effort);
+        await stream(p, key, messages, write, ctrl.signal, effort, alive);
         return { provider: name };
       } catch (e) {
         if (clientSignal && clientSignal.aborted) throw clientGone();
-        if (timedOut) e = Object.assign(new Error("keine Antwort innerhalb von " + Math.round(firstTokenMs / 1000) + " s"), { timedOut: true });
+        if (timedOut) e = Object.assign(new Error("keine Daten seit " + Math.round(stallMs / 1000) + " s — Verbindung abgebrochen"), { timedOut: true });
         lastErr = e;
         if (wrote) throw e; // already streamed -> cannot fall back to a clean answer
         const retry = attempt === 0 && isTransientError(e);

@@ -1,4 +1,4 @@
-/* Tutor stream retry / disconnect checks for serve.js streamWithFallback.
+/* Tutor stream retry / stall / disconnect checks for serve.js streamWithFallback.
  * Run: node tests/stream.test.js
  * Uses a fake streamer (no network, no API key) injected via opts.stream.
  */
@@ -30,7 +30,7 @@ const err = (status, name) => Object.assign(new Error("boom " + status), { statu
   assert.ok(!isTransientError(err(400)), "400 is not transient");
   assert.ok(!isTransientError(err(401)), "401 is not transient");
   assert.ok(!isTransientError(err(undefined, "APIUserAbortError")), "user abort is not transient");
-  assert.ok(!isTransientError(Object.assign(err(undefined), { timedOut: true })), "timeout is not transient");
+  assert.ok(!isTransientError(Object.assign(err(undefined), { timedOut: true })), "a stall is not transient");
 
   // 1) transient pre-token failure -> retried once, second attempt streams
   {
@@ -77,18 +77,48 @@ const err = (status, name) => Object.assign(new Error("boom " + status), { statu
     assert.strictEqual(res.out, "halb");
   }
 
-  // 5) first-token timeout -> aborted upstream, not retried, readable message
+  // 5) silent upstream (no text, no thinking progress) -> aborted as a stall, not retried
   {
     let calls = 0, sawAbort = false;
     await assert.rejects(streamWithFallback(PAYLOAD, fakeRes(), Object.assign({}, BASE, {
-      firstTokenMs: 30,
+      stallMs: 30,
       stream: (p, key, messages, write, signal) => new Promise((resolve, reject) => {
         calls++;
         signal.addEventListener("abort", () => { sawAbort = true; reject(err(undefined, "APIUserAbortError")); });
       }),
-    })), /keine Antwort innerhalb/);
-    assert.ok(sawAbort, "timeout should abort the upstream request");
-    assert.strictEqual(calls, 1, "timeout must not be retried");
+    })), /keine Daten seit/);
+    assert.ok(sawAbort, "a stall should abort the upstream request");
+    assert.strictEqual(calls, 1, "a stall must not be retried");
+  }
+
+  // 5b) long thinking with steady progress events outlives the stall window
+  {
+    const res = fakeRes();
+    await streamWithFallback(PAYLOAD, res, Object.assign({}, BASE, {
+      stallMs: 40,
+      stream: async (p, key, messages, write, signal, effort, onActivity) => {
+        for (let t = 0; t < 12; t++) {           // ~120 ms of "thinking", 3x the stall window
+          await new Promise((r) => setTimeout(r, 10));
+          if (signal.aborted) throw err(undefined, "APIUserAbortError");
+          onActivity();
+        }
+        write("fertig");
+      },
+    }));
+    assert.strictEqual(res.out, "fertig", "thinking progress must keep the attempt alive");
+  }
+
+  // 5c) stream that stalls mid-answer is cut off too
+  {
+    const res = fakeRes();
+    await assert.rejects(streamWithFallback(PAYLOAD, res, Object.assign({}, BASE, {
+      stallMs: 30,
+      stream: (p, key, messages, write, signal) => new Promise((resolve, reject) => {
+        write("halb");
+        signal.addEventListener("abort", () => reject(err(undefined, "APIUserAbortError")));
+      }),
+    })), /keine Daten seit/);
+    assert.strictEqual(res.out, "halb");
   }
 
   // 6) client disconnect mid-generation -> upstream aborted, no retry, clientGone

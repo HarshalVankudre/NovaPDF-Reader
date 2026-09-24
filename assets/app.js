@@ -155,6 +155,9 @@
         if (!buf.byteLength) throw new Error("empty response (0 bytes)");
         return buf;
       })());
+      // don't pin a failed fetch: the next thumbnail/viewer request retries it
+      const pr = bytesCache.get(L.num);
+      pr.catch(() => { if (bytesCache.get(L.num) === pr) { bytesCache.delete(L.num); docCache.delete(L.num); } });
     }
     return bytesCache.get(L.num);
   }
@@ -162,8 +165,10 @@
   // thread (~120 ms, cached once per lecture) — predictable, no worker stalls.
   function getLectureDoc(L) {
     if (!docCache.has(L.num)) {
-      docCache.set(L.num, getLectureBytes(L).then((buf) =>
-        pdfjsLib.getDocument({ data: buf.slice(), disableWorker: true }).promise));
+      const pr = getLectureBytes(L).then((buf) =>
+        pdfjsLib.getDocument({ data: buf.slice(), disableWorker: true }).promise);
+      docCache.set(L.num, pr);
+      pr.catch(() => { if (docCache.get(L.num) === pr) docCache.delete(L.num); });
     }
     return docCache.get(L.num);
   }
@@ -178,27 +183,42 @@
   }
 
   const THUMB_W = 700; // render width (px) — displayed scaled, stays crisp
+  // Each cached 700px bitmap is ~1.5 MB, so scrolling the whole 317-slide
+  // navigator would otherwise pin ~0.5 GB. Keep the most recently used ones
+  // (Map insertion order = recency) and re-render evicted slides on demand.
+  const PAGE_RENDER_CACHE_MAX = 60;
+  // Memoize an async per-page computation; a rejected promise is dropped so a
+  // transient failure (lecture fetch hiccup) is retried on the next request.
+  function cachedPage(cache, globalPage, make, max) {
+    if (cache.has(globalPage)) {
+      const hit = cache.get(globalPage);
+      if (max) { cache.delete(globalPage); cache.set(globalPage, hit); }
+      return hit;
+    }
+    const pr = make();
+    cache.set(globalPage, pr);
+    pr.catch(() => { if (cache.get(globalPage) === pr) cache.delete(globalPage); });
+    if (max && cache.size > max) cache.delete(cache.keys().next().value);
+    return pr;
+  }
   // Render a slide to a bitmap once (cached). Highlight geometry is computed
   // separately by getWordBoxes, so the main viewer can highlight without
   // re-rendering a thumbnail bitmap.
   function getPageRender(globalPage) {
-    if (!pageRenderCache.has(globalPage)) {
-      pageRenderCache.set(globalPage, (async () => {
-        const L = pageToLecture[globalPage];
-        const doc = await getLectureDoc(L);
-        const page = await doc.getPage(globalPage - L.startPage + 1);
-        const base = page.getViewport({ scale: 1 });
-        const scale = THUMB_W / base.width;
-        const vp = page.getViewport({ scale });
-        const canvas = document.createElement("canvas");
-        canvas.width = Math.floor(vp.width);
-        canvas.height = Math.floor(vp.height);
-        await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
-        const bitmap = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
-        return { bitmap, cssW: vp.width, cssH: vp.height };
-      })());
-    }
-    return pageRenderCache.get(globalPage);
+    return cachedPage(pageRenderCache, globalPage, async () => {
+      const L = pageToLecture[globalPage];
+      const doc = await getLectureDoc(L);
+      const page = await doc.getPage(globalPage - L.startPage + 1);
+      const base = page.getViewport({ scale: 1 });
+      const scale = THUMB_W / base.width;
+      const vp = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      await page.render({ canvasContext: canvas.getContext("2d"), viewport: vp }).promise;
+      const bitmap = typeof createImageBitmap === "function" ? await createImageBitmap(canvas) : canvas;
+      return { bitmap, cssW: vp.width, cssH: vp.height };
+    }, PAGE_RENDER_CACHE_MAX);
   }
 
   const fold = (w) => (typeof SlideSearchEngine.fold === "function" ? SlideSearchEngine.fold(w) : w.toLowerCase());
@@ -230,51 +250,48 @@
   // run's true rendered width via canvas measureText, so highlights hug the word.
   const wordBoxCache = new Map();
   function getWordBoxes(globalPage) {
-    if (!wordBoxCache.has(globalPage)) {
-      wordBoxCache.set(globalPage, (async () => {
-        const L = pageToLecture[globalPage];
-        const doc = await getLectureDoc(L);
-        const page = await doc.getPage(globalPage - L.startPage + 1);
-        const vp = page.getViewport({ scale: 1 });
-        const pageW = vp.width || 1, pageH = vp.height || 1;
-        const boxes = [];
-        const meas = document.createElement("canvas").getContext("2d");
-        const RE = /[\p{L}\p{N}]+/gu;
-        try {
-          const tc = await page.getTextContent();
-          const styles = tc.styles || {};
-          for (const it of tc.items) {
-            const str = it.str || "";
-            if (!str.trim()) continue;
-            const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
-            const fontH = Math.hypot(tx[2], tx[3]) || 10;
-            const x0 = tx[4], yTop = tx[5] - fontH;
-            const runW = it.width || 0; // already in scale-1 page units
-            // measure with the run's real font family (serif/sans/mono from the
-            // pdf.js style map) — proportions match the PDF better than a fixed
-            // sans-serif guess, so per-word boxes hug the words more tightly
-            const fam = (styles[it.fontName] && styles[it.fontName].fontFamily) || "sans-serif";
-            meas.font = fontH + "px " + fam;
-            const full = meas.measureText(str).width || 1;
-            const k = runW > 0 ? runW / full : 0; // map our metrics onto the true run width
-            let m; RE.lastIndex = 0;
-            while ((m = RE.exec(str)) !== null) {
-              const pre = meas.measureText(str.slice(0, m.index)).width;
-              const wpx = meas.measureText(m[0]).width;
-              boxes.push({
-                f: fold(m[0]),
-                x: (x0 + pre * k) / pageW,
-                y: yTop / pageH,
-                w: (wpx * k) / pageW,
-                h: (fontH * 1.18) / pageH,
-              });
-            }
+    return cachedPage(wordBoxCache, globalPage, async () => {
+      const L = pageToLecture[globalPage];
+      const doc = await getLectureDoc(L);
+      const page = await doc.getPage(globalPage - L.startPage + 1);
+      const vp = page.getViewport({ scale: 1 });
+      const pageW = vp.width || 1, pageH = vp.height || 1;
+      const boxes = [];
+      const meas = document.createElement("canvas").getContext("2d");
+      const RE = /[\p{L}\p{N}]+/gu;
+      try {
+        const tc = await page.getTextContent();
+        const styles = tc.styles || {};
+        for (const it of tc.items) {
+          const str = it.str || "";
+          if (!str.trim()) continue;
+          const tx = pdfjsLib.Util.transform(vp.transform, it.transform);
+          const fontH = Math.hypot(tx[2], tx[3]) || 10;
+          const x0 = tx[4], yTop = tx[5] - fontH;
+          const runW = it.width || 0; // already in scale-1 page units
+          // measure with the run's real font family (serif/sans/mono from the
+          // pdf.js style map) — proportions match the PDF better than a fixed
+          // sans-serif guess, so per-word boxes hug the words more tightly
+          const fam = (styles[it.fontName] && styles[it.fontName].fontFamily) || "sans-serif";
+          meas.font = fontH + "px " + fam;
+          const full = meas.measureText(str).width || 1;
+          const k = runW > 0 ? runW / full : 0; // map our metrics onto the true run width
+          let m; RE.lastIndex = 0;
+          while ((m = RE.exec(str)) !== null) {
+            const pre = meas.measureText(str.slice(0, m.index)).width;
+            const wpx = meas.measureText(m[0]).width;
+            boxes.push({
+              f: fold(m[0]),
+              x: (x0 + pre * k) / pageW,
+              y: yTop / pageH,
+              w: (wpx * k) / pageW,
+              h: (fontH * 1.18) / pageH,
+            });
           }
-        } catch (e) {}
-        return { boxes };
-      })());
-    }
-    return wordBoxCache.get(globalPage);
+        }
+      } catch (e) {}
+      return { boxes };
+    });
   }
 
   // Paint yellow highlight boxes (CSS-% divs) for every word whose folded form is
@@ -370,8 +387,12 @@
     try { r = await getPageRender(globalPage); }
     catch (e) { card.classList.add("thumb-failed"); return; }
     if (!card.isConnected) return;
-    canvas.width = r.bitmap.width; canvas.height = r.bitmap.height;
-    canvas.getContext("2d").drawImage(r.bitmap, 0, 0);
+    // back the card canvas at its displayed size (x DPR), not the full 700px
+    // bitmap — a navigator full of rendered cards stays a fraction of the memory
+    const shown = canvas.clientWidth || (canvas.parentElement && canvas.parentElement.clientWidth) || 0;
+    const w = shown ? Math.min(r.bitmap.width, Math.ceil(shown * Math.min(window.devicePixelRatio || 1, 2))) : r.bitmap.width;
+    canvas.width = w; canvas.height = Math.round(r.bitmap.height * (w / r.bitmap.width));
+    canvas.getContext("2d").drawImage(r.bitmap, 0, 0, canvas.width, canvas.height);
     card.classList.add("thumb-ready");
     if (hl) {
       if (cq) { try { const wb = await getWordBoxes(globalPage); if (card.isConnected) placeHighlights(hl, wb, cq); } catch (e) {} }
@@ -608,6 +629,7 @@
   let autoRunSql = true;    // :auto → read-only SQL in answers runs by itself against the imported DB
   let checkMode = false;    // OFF by default — no automatic Gegenprüfung; :check opts back in
   let askQueue = [];        // questions pasted while one is streaming wait here and fire automatically
+  let askCtrl = null;       // aborts the in-flight answer (:stop, :new) — the server then stops the upstream generation too
   let streamBodyEl = null;  // the DOM node of the currently-streaming answer
   let pendingImages = [];   // pasted screenshots queued for the next ask {media_type,data,dataUrl}
   let pendingFiles = [];    // pasted text/SQL files queued for the next ask {name,text,truncated}
@@ -795,7 +817,8 @@
 
   // POST to the tutor endpoint with one silent retry when nothing has been
   // received yet (exam-day resilience: a flaky first connection self-heals).
-  async function postQ(messages, effort) {
+  // A 4xx (e.g. missing API key) or a deliberate abort is final — no retry.
+  async function postQ(messages, effort, signal) {
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -803,14 +826,16 @@
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ provider: AI_PROVIDER, messages: messages, effort: effort }),
+          signal: signal,
         });
         if (!resp.ok || !resp.body) {
           const e = await resp.json().catch(() => ({}));
-          throw new Error(e.error || "Request failed (HTTP " + resp.status + ")");
+          throw Object.assign(new Error(e.error || "Request failed (HTTP " + resp.status + ")"), { status: resp.status });
         }
         return resp;
       } catch (err) {
         lastErr = err;
+        if ((signal && signal.aborted) || (err.status >= 400 && err.status < 500)) break;
         if (attempt === 0) await new Promise((r) => setTimeout(r, 800));
       }
     }
@@ -972,6 +997,8 @@
     setAiBusy(true);
     const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
     let assistantTurn = null;
+    const ctrl = askCtrl = new AbortController();
+    let acc = "";
 
     try {
       // The only model is Claude Fable 5 (multimodal: text + screenshots).
@@ -1112,10 +1139,10 @@
       // the ✓✓/⚠ verdict lands seconds after the last token instead of a full
       // second solve later
       const wantCheck = checkMode && !fastMode;
-      const shadowPromise = wantCheck ? postQ(messages).then(readAll).catch(() => null) : null;
+      const shadowPromise = wantCheck ? postQ(messages, undefined, ctrl.signal).then(readAll).catch(() => null) : null;
 
       assistantTurn = aiThread[aiThread.length - 1];
-      let acc = "", pending = false;
+      let pending = false;
       const flush = () => {
         pending = false;
         if (!streamBodyEl) return;
@@ -1125,7 +1152,7 @@
         if (doc) doc.scrollTop = doc.scrollHeight;
       };
       // :fast trades reasoning depth for latency (medium effort, no images, no check)
-      const resp = await postQ(messages, fastMode ? "medium" : undefined); // one silent retry if nothing streamed yet
+      const resp = await postQ(messages, fastMode ? "medium" : undefined, ctrl.signal); // one silent retry if nothing streamed yet
       const reader = resp.body.getReader();
       const dec = new TextDecoder();
       for (;;) {
@@ -1158,12 +1185,20 @@
       }
     } catch (e) {
       if (assistantTurn) {
-        assistantTurn.content = "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
-        if (streamBodyEl) streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content);
-      } else {
+        // keep whatever already streamed — a dropped connection or :stop must
+        // not throw away a nearly complete answer
+        const note = ctrl.signal.aborted ? "_(abgebrochen)_" : "_(Fehler: " + ((e && e.message) || "Anfrage fehlgeschlagen") + ")_";
+        assistantTurn.content = acc ? acc + "\n\n" + note : note;
+        if (streamBodyEl) {
+          streamBodyEl.innerHTML = renderMarkdown(assistantTurn.content);
+          enhanceAnswer(streamBodyEl);
+          if (acc) addAnswerActions(streamBodyEl, assistantTurn);
+        }
+      } else if (!ctrl.signal.aborted) {
         showAiToast("Fehler");
       }
     } finally {
+      if (askCtrl === ctrl) askCtrl = null;
       setAiBusy(false);
       persistThread();
       const doc = aiPanel.querySelector("#ntDoc");
@@ -1440,7 +1475,8 @@
     const raw = v.slice(1).toLowerCase().trim();
     const done = () => { qInput.value = ""; onInput(); };
     if (raw === "ai") { toggleAiBar(); done(); }
-    else if (raw === "new" || raw === "reset") { aiThread = []; persistThread(); closeChat(); showAiToast("Neue Notiz"); done(); }
+    else if (raw === "new" || raw === "reset") { stopAsk(); aiThread = []; persistThread(); closeChat(); showAiToast("Neue Notiz"); done(); }
+    else if (raw === "stop" || raw === "abbrechen") { showAiToast(stopAsk() ? "abgebrochen" : "nichts aktiv"); done(); }
     else if (raw === "close") { closeChat(); done(); }
     else if (raw === "notes" || raw === "notizen" || raw === "log") {
       if (aiThread.length) { openChat(); renderThread(); } else showAiToast("Noch keine Notizen");
@@ -1461,7 +1497,15 @@
       showAiToast(checkMode ? "Gegenprüfung an (✓✓)" : "Gegenprüfung aus");
       done();
     }
-    else { showAiToast(":ai  :new  :notes  :sql  :fast  :vision  :auto  :check"); done(); }
+    else { showAiToast(":ai  :new  :stop  :notes  :sql  :fast  :vision  :auto  :check"); done(); }
+  }
+  // Abort the streaming answer (partial text stays, marked "abgebrochen") and
+  // drop queued questions. Closing the request also stops the server-side generation.
+  function stopAsk() {
+    const had = !!askCtrl || askQueue.length > 0;
+    askQueue = [];
+    if (askCtrl) askCtrl.abort();
+    return had;
   }
   function setFastMode(on) {
     fastMode = !!on;
@@ -1578,8 +1622,10 @@
       if (e.key === "Escape" && !typing) { e.preventDefault(); panicHide(); return; }
       if (e.key === "/" && !typing) { e.preventDefault(); revealSearch(true); } // reveal search
       else if (!typing && e.key === "Enter" && askChord(e)) { e.preventDefault(); runAsk(); } // the ask chords work from the viewer too
-      else if (!typing && e.key === "ArrowLeft") { e.preventDefault(); goToPage(pageNum - 1); }
-      else if (!typing && e.key === "ArrowRight") { e.preventDefault(); goToPage(pageNum + 1); }
+      else if (!typing && (e.key === "ArrowLeft" || e.key === "PageUp")) { e.preventDefault(); goToPage(pageNum - 1); }
+      else if (!typing && (e.key === "ArrowRight" || e.key === "PageDown")) { e.preventDefault(); goToPage(pageNum + 1); }
+      else if (!typing && e.key === "Home") { e.preventDefault(); goToPage(1); }
+      else if (!typing && e.key === "End") { e.preventDefault(); goToPage(pdfTotal); }
     });
   }
 

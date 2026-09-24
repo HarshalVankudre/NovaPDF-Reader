@@ -64,7 +64,7 @@ assert.doesNotMatch(app, /localStorage\.setItem\(THREAD_KEY/, "the thread must n
 // conflicts go to a strict arbiter (2-of-3) so a wrong "correction" can't
 // flip a right answer
 assert.match(app, /let checkMode = false;/, "the automatic Gegenprüfung must be OFF by default");
-assert.match(app, /const shadowPromise = wantCheck \? postQ\(messages\)/,
+assert.match(app, /const shadowPromise = wantCheck \? postQ\(messages[,)]/,
   "the shadow solve should start in parallel with the visible answer");
 assert.match(app, /async function crossCheckAnswer\(/, "answers should be cross-checked");
 assert.match(app, /function normalizeVerdictText\(/, "identical results should confirm without an extra call");
@@ -79,6 +79,9 @@ assert.match(app, /const pastedTask = q\.length >= 160;/, "pasted tasks should s
 // resilience + rapid-fire flow
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");
 assert.match(app, /askQueue\.shift\(\)/, "questions pasted while streaming should queue and fire automatically");
+assert.match(app, /function stopAsk\(/, ":stop should abort the streaming answer");
+assert.match(app, /signal: signal,/, "tutor requests should be abortable");
+assert.match(app, /assistantTurn\.content = acc \? acc \+ /, "a failed/aborted stream must keep the partial answer");
 // per-request effort routing: arbiter deepest, :fast snappier, server whitelists
 assert.match(app, /postQ\(\[\{ role: "user", content: adjBlocks \}\], "xhigh"\)/,
   "the arbiter should run at maximum reasoning depth");

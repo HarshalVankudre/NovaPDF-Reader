@@ -114,6 +114,18 @@ function parseByteRange(header, size) {
   return { start, end };
 }
 
+// Static-file ETags are size+mtime. Vercel bundles may not preserve mtimes,
+// so there the deployment id is mixed in (a new deploy never matches old tags).
+const ETAG_SALT = process.env.VERCEL
+  ? String(process.env.VERCEL_DEPLOYMENT_ID || process.env.VERCEL_GIT_COMMIT_SHA || Date.now().toString(36)).slice(0, 16) + "-"
+  : "";
+function etagMatches(header, etag) {
+  if (!header) return false;
+  if (header.trim() === "*") return true;
+  const bare = (t) => t.trim().replace(/^W\//, "");
+  return header.split(",").some((t) => bare(t) === bare(etag));
+}
+
 // ===================== LLM proxy (keys stay server-side) =====================
 // API keys come from environment variables, or a gitignored serve.config.json.
 // The browser never sees a key — it POSTs to /llm and this server calls the LLM.
@@ -419,36 +431,72 @@ function normalizeProvider(name) {
   return PROVIDERS[r] ? r : null;
 }
 
+function streamProvider(p, key, messages, write, signal, effort) {
+  return p.kind === "anthropic"
+    ? streamAnthropic(p, key, messages, write, signal, effort)
+    : streamOpenAICompatible(p, key, messages, write, signal);
+}
+
+// Worth one more try: rate limits, overload (529 / an SSE overloaded_error,
+// which carries no HTTP status) and dropped connections. Never retried: 4xx
+// request errors, the first-token timeout, and a client that went away.
+const TRANSIENT_STATUS = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+function isTransientError(e) {
+  if (!e || e.timedOut || e.clientGone) return false;
+  if (e.name === "AbortError" || e.name === "APIUserAbortError") return false;
+  return e.status == null || TRANSIENT_STATUS.has(e.status);
+}
+const RETRY_DELAY_MS = 1500;
+
 // Try each provider in the chain until one starts streaming tokens. A provider
-// that fails BEFORE emitting a token (error, 5xx, or first-token timeout) is
-// skipped and the next is tried; once tokens have been written we commit to that
-// provider (we can't un-send a partial answer). This is the exam-day safety net.
-async function streamWithFallback(payload, res) {
+// that fails BEFORE emitting a token is retried once if the failure looks
+// transient, then the next provider is tried; once tokens have been written we
+// commit (we can't un-send a partial answer). This is the exam-day safety net.
+// opts.signal aborts the upstream request when the browser disconnects, so a
+// closed tab or a :stop doesn't keep a paid generation running.
+async function streamWithFallback(payload, res, opts = {}) {
   const messages = payload.messages;
   const effort = normalizeEffort(payload && payload.effort);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
+  const clientSignal = opts.signal || null;
+  const stream = opts.stream || streamProvider;
+  const keys = opts.keys || KEYS;
+  const firstTokenMs = opts.firstTokenMs || FIRST_TOKEN_MS;
+  const retryDelayMs = opts.retryDelayMs != null ? opts.retryDelayMs : RETRY_DELAY_MS;
+  const clientGone = () => Object.assign(new Error("client disconnected"), { clientGone: true });
   let wrote = false;
   let lastErr = null;
   for (let i = 0; i < chain.length; i++) {
     const name = chain[i];
     const p = PROVIDERS[name];
-    const key = KEYS[name];
+    const key = keys[name];
     if (!p || !key) { lastErr = Object.assign(new Error("No API key for " + (p ? p.label : name)), { status: 400 }); continue; }
-    const ctrl = new AbortController();
-    let got = false;
-    const write = (t) => { if (t == null || t === "") return; got = true; wrote = true; clearTimeout(timer); try { res.write(t); } catch (e) {} };
-    const timer = setTimeout(() => { if (!got) { try { ctrl.abort(); } catch (e) {} } }, FIRST_TOKEN_MS);
-    try {
-      console.log("POST /q  try[" + i + "]=" + name + " (" + p.model + ", effort=" + effort + ")");
-      if (p.kind === "anthropic") await streamAnthropic(p, key, messages, write, ctrl.signal, effort);
-      else await streamOpenAICompatible(p, key, messages, write, ctrl.signal);
-      clearTimeout(timer);
-      return { provider: name };
-    } catch (e) {
-      clearTimeout(timer);
-      lastErr = e;
-      if (wrote) throw e; // already streamed -> cannot fall back to a clean answer
-      console.log("  provider " + name + " failed pre-stream: " + (e && e.message) + (i + 1 < chain.length ? " -> fallback" : ""));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (clientSignal && clientSignal.aborted) throw clientGone();
+      const ctrl = new AbortController();
+      const onClientAbort = () => { try { ctrl.abort(); } catch (e) {} };
+      if (clientSignal) clientSignal.addEventListener("abort", onClientAbort, { once: true });
+      let got = false, timedOut = false;
+      const write = (t) => { if (t == null || t === "") return; got = true; wrote = true; clearTimeout(timer); try { res.write(t); } catch (e) {} };
+      const timer = setTimeout(() => { if (!got) { timedOut = true; try { ctrl.abort(); } catch (e) {} } }, firstTokenMs);
+      try {
+        console.log("POST /q  try[" + i + (attempt ? "." + attempt : "") + "]=" + name + " (" + p.model + ", effort=" + effort + ")");
+        await stream(p, key, messages, write, ctrl.signal, effort);
+        return { provider: name };
+      } catch (e) {
+        if (clientSignal && clientSignal.aborted) throw clientGone();
+        if (timedOut) e = Object.assign(new Error("keine Antwort innerhalb von " + Math.round(firstTokenMs / 1000) + " s"), { timedOut: true });
+        lastErr = e;
+        if (wrote) throw e; // already streamed -> cannot fall back to a clean answer
+        const retry = attempt === 0 && isTransientError(e);
+        console.log("  provider " + name + " failed pre-stream: " + (e && e.message) +
+          (retry ? " -> retry" : (i + 1 < chain.length ? " -> fallback" : "")));
+        if (!retry) break;
+        await sleep(retryDelayMs);
+      } finally {
+        clearTimeout(timer);
+        if (clientSignal) clientSignal.removeEventListener("abort", onClientAbort);
+      }
     }
   }
   throw lastErr || new Error("all providers failed");
@@ -638,9 +686,13 @@ function handleRequest(req, res) {
       }
       console.log("POST /q  chain=[" + chain.join(",") + "]  image=" + messagesContainImage(messages) + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
+      // browser gone (tab closed, :stop, new question) -> abort the upstream generation
+      const client = new AbortController();
+      res.on("close", () => { if (!res.writableFinished) client.abort(); });
       try {
-        await streamWithFallback(payload, res);
+        await streamWithFallback(payload, res, { signal: client.signal });
       } catch (e) {
+        if (e && e.clientGone) { console.log("  client disconnected -> upstream aborted"); return; }
         console.log("stream error:", e && e.message);
         try { res.write("\n\n_(Fehler: " + ((e && e.message) || "stream failed") + ")_"); } catch (e2) {}
       }
@@ -717,6 +769,17 @@ function handleRequest(req, res) {
     const onErr = (e) => { console.log(`${tag} STREAM ERROR ${e && e.message}`); try { res.destroy(); } catch {} };
     const count = (s) => s.on("data", (c) => (sent += c.length));
 
+    // "no-cache" means revalidate, and without validators every revalidation
+    // was a full re-download (pdf.js fetches its 1 MB worker once per lecture).
+    // An ETag lets unchanged files come back as a bodyless 304 while edits are
+    // still picked up on a normal reload.
+    const etag = `W/"${ETAG_SALT}${st.size.toString(16)}-${Math.floor(st.mtimeMs).toString(16)}"`;
+    const lastModified = st.mtime.toUTCString();
+    if (!range && etagMatches(req.headers["if-none-match"], etag)) {
+      res.writeHead(304, { "Cache-Control": "no-cache", ETag: etag, "Last-Modified": lastModified });
+      return res.end();
+    }
+
     if (range) {
       const parsed = parseByteRange(range, st.size);
       if (!parsed) { res.writeHead(416, { "Content-Range": `bytes */${st.size}` }); return res.end(); }
@@ -727,6 +790,7 @@ function handleRequest(req, res) {
         "Accept-Ranges": "bytes",
         "Content-Length": end - start + 1,
         "Cache-Control": "no-cache",
+        ETag: etag,
       });
       if (req.method === "HEAD") return res.end();
       count(fs.createReadStream(filePath, { start, end }).on("error", onErr)).pipe(res);
@@ -736,6 +800,8 @@ function handleRequest(req, res) {
         "Content-Length": st.size,
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-cache",
+        ETag: etag,
+        "Last-Modified": lastModified,
       });
       if (req.method === "HEAD") return res.end();
       count(fs.createReadStream(filePath).on("error", onErr)).pipe(res);
@@ -746,7 +812,7 @@ function handleRequest(req, res) {
 // The same handler runs in two modes: `node serve.js` starts the local HTTP
 // server below; on Vercel, api/index.js imports handleRequest and runs it as
 // a serverless function (no listen()).
-module.exports = { handleRequest };
+module.exports = { handleRequest, streamWithFallback, isTransientError };
 
 if (require.main === module) {
   const server = http.createServer(handleRequest);

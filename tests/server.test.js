@@ -58,6 +58,13 @@ async function request(pathname, init) {
     const index = await request("/");
     assert.strictEqual(index.status, 200, "index should load");
     assert.match(index.headers.get("content-type") || "", /^text\/html/i);
+    const etag = index.headers.get("etag");
+    assert.ok(etag, "static files should carry an ETag");
+    const revalidated = await request("/", { headers: { "If-None-Match": etag } });
+    assert.strictEqual(revalidated.status, 304, "an unchanged file should revalidate as 304");
+    assert.strictEqual((await revalidated.arrayBuffer()).byteLength, 0, "a 304 must have no body");
+    const stale = await request("/", { headers: { "If-None-Match": 'W/"stale"' } });
+    assert.strictEqual(stale.status, 200, "a non-matching ETag should get the full file");
 
     const config = await request("/serve.config.json");
     assert.strictEqual(config.status, 403, "serve.config.json must not be exposed");

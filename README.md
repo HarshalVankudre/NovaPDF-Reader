@@ -22,8 +22,8 @@ data/PDF.
 > split into small per-lecture PDFs that load on demand, and the loader retries
 > in chunks, so flaky connections recover automatically.
 
-> Tip: hard-refresh with **Ctrl+Shift+R** after any code change to bypass the
-> browser cache.
+> Tip: after a code change a normal reload is enough — static files are
+> revalidated via ETag (Ctrl+Shift+R still works if in doubt).
 
 ## Hidden tutor chat (stealth, streaming, RAG over the slides)
 
@@ -43,12 +43,13 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | **Ctrl + Alt + Enter** or **hold `d` + Enter** | Ask the tutor (streams into the "Notizen" pane); works in the search box and from the bare viewer |
 | **paste a screenshot / `.sql` file** | Attach it to the next question — a screenshot becomes the question; a copied `.sql`/text file is attached as context the tutor reads (Enter then sends) |
 | **Esc** | Close the tutor notes and return to the normal search + viewer |
-| **← / →** | Previous / next page (works in plain-viewer mode too) |
+| **← / →**, **PgUp / PgDn** | Previous / next page (works in plain-viewer mode too); **Home / End** jump to the first / last slide |
 | type `:new` ↵ | Start a fresh conversation (clears the thread) |
+| type `:stop` ↵ | Stop the answer that is streaming (keeps what arrived so far) and drop queued questions |
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
 Every question — text and pasted screenshots alike — uses Anthropic
-**Claude Opus 4.8** (`claude-opus-4-8`); it's multimodal with high-res vision, so it reads
+**Claude Fable 5** (`claude-fable-5`); it's multimodal with high-res vision, so it reads
 screenshots and slide images directly. It's the only model — there's no picker
 and no switching command. The proxy endpoints are `/q` (streaming chat) and
 `/llm` (single-shot, legacy) — neutral names, keys server-side only.
@@ -111,7 +112,8 @@ node tests/engine.test.js
 | Key | Action |
 |-----|--------|
 | `/` | focus the search box |
-| `←` / `→` | previous / next slide |
+| `←` / `→`, `PgUp` / `PgDn` | previous / next slide |
+| `Home` / `End` | first / last slide |
 | `Enter` (in search) | open the top result |
 | `Esc` (in search) | clear |
 

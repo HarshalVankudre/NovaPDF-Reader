@@ -49,7 +49,7 @@ It's **multi-turn**. The panel is titled "Notizen" and carries **no AI branding*
 | type `:ai` ↵ | Show/hide the visible control bar (off by default) |
 
 Every question — text and pasted screenshots alike — uses Anthropic
-**Claude Fable 5** (`claude-fable-5`); it's multimodal with high-res vision, so it reads
+**Claude Haiku 5.5** (`claude-haiku-5-5`); it's multimodal, so it reads
 screenshots and slide images directly. It's the only model — there's no picker
 and no switching command. The proxy endpoints are `/q` (streaming chat) and
 `/llm` (single-shot, legacy) — neutral names, keys server-side only.
@@ -65,7 +65,7 @@ setx ANTHROPIC_API_KEY "sk-ant-..."
 
 The server also loads `.env` and `.env.txt` from the project directory.
 Alternatively, copy `serve.config.example.json` to `serve.config.json`
-(gitignored). The model ID is configurable under `models.sonnet`.
+(gitignored). The model ID is configurable under `models.opus`.
 
 ## How it works
 

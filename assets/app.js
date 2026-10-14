@@ -8,7 +8,7 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const AI_PROVIDER = "opus";              // provider id (historical name) — the model behind it is Claude Fable 5 (text + high-res vision)
+  const AI_PROVIDER = "opus";              // provider id (historical name) — the model behind it is Claude Haiku 5.5 (text + vision)
   const VISION_SLIDES = 3; // top slides attached as images for vision grounding
   const VISION_MAX = 4;    // cap incl. extra diagram-heavy slides pulled from ranks 4-6
   const VISION_WIDTH = 2200; // vision render width — within Fable 5's 2576px high-res limit, so no API-side downscale
@@ -1003,7 +1003,7 @@
     let acc = "";
 
     try {
-      // The only model is Claude Fable 5 (multimodal: text + screenshots).
+      // The only model is Claude Haiku 5.5 (multimodal: text + screenshots).
       const provider = AI_PROVIDER;
 
       // BM25 slide text is for TEXT questions only.

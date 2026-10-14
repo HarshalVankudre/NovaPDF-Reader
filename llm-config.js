@@ -41,14 +41,14 @@ function createLLMConfig(root, config = {}, env = process.env) {
     },
     providers: {
       // Provider id stays "opus" (client AI_PROVIDER + models.opus override key)
-      // even though the model is now Claude Fable 5 — renaming the id would
+      // even though the model is now Claude Haiku 5.5 — renaming the id would
       // ripple through the client, tests, and existing serve.config.json files.
       opus: {
-        label: "Claude Fable 5",
-        model: models.opus || "claude-fable-5",
+        label: "Claude Haiku 5.5",
+        model: models.opus || "claude-haiku-5-5",
         kind: "anthropic",
         envHint: "ANTHROPIC_API_KEY",
-        vision: true, // Fable 5 is multimodal with high-res vision (2576px) — reads dense ER diagrams
+        vision: true, // Haiku 5.5 is multimodal — reads screenshots and slide images
       },
     },
   };
@@ -61,7 +61,7 @@ function messagesContainImage(messages) {
   );
 }
 
-// The single provider (id "opus", model Claude Fable 5) is multimodal, so it
+// The single provider (id "opus", model Claude Haiku 5.5) is multimodal, so it
 // serves every request — text questions and pasted screenshots alike.
 function selectProviderForMessages() {
   return "opus";

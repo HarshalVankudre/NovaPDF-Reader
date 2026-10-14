@@ -113,7 +113,7 @@ async function request(pathname, init) {
       }),
     });
     assert.strictEqual(textRoute.status, 400, "text requests should validate a usable key before streaming");
-    assert.match((await textRoute.json()).error || "", /Claude Fable 5.*ANTHROPIC_API_KEY/i);
+    assert.match((await textRoute.json()).error || "", /Claude Haiku 5\.5.*ANTHROPIC_API_KEY/i);
 
     const imageRoute = await request("/q", {
       method: "POST",
@@ -123,7 +123,7 @@ async function request(pathname, init) {
       }),
     });
     assert.strictEqual(imageRoute.status, 400, "image requests should validate the key before streaming");
-    assert.match((await imageRoute.json()).error || "", /Claude Fable 5.*ANTHROPIC_API_KEY/i);
+    assert.match((await imageRoute.json()).error || "", /Claude Haiku 5\.5.*ANTHROPIC_API_KEY/i);
 
     console.log("server regression checks passed");
   } finally {

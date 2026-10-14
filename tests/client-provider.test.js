@@ -11,15 +11,11 @@ assert.doesNotMatch(html, /id="aiProvider"/, "the provider selector should be go
 assert.match(app, /const AI_PROVIDER = "opus";/, "Opus is the only model");
 assert.doesNotMatch(app, /PROVIDER_ALIASES/, "provider aliases should be removed");
 assert.doesNotMatch(app, /aiProviderSel/, "the provider selector wiring should be removed");
-// every ask sends the one model
+// every ask sends the one model. The question, pasted screenshots, and files are the task.
 assert.match(app, /const provider = AI_PROVIDER;/);
-// vision grounding: typed questions attach rendered top-slide images unless :fast is on
-assert.match(app, /const VISION_SLIDES = 3;/);
-assert.match(app, /const VISION_MAX = 4;/, "diagram-heavy near-top slides may add a 4th vision image");
-assert.match(app, /renderSlideForVision\(/);
 assert.match(app, /let fastMode = false;/);
-// each slide image is labeled with its page so the model's citations stay precise
-assert.match(app, /"Bild von Folie " \+ im\.page/, "vision images should be labeled with their Folie number");
+assert.doesNotMatch(app, /const VISION_SLIDES/, "typed questions must not attach lecture slides");
+assert.doesNotMatch(app, /auch als Bild beigefügt/, "slide excerpts must not be sent with the question");
 // generated ```sql blocks are syntax-colored via a tokenize→escape→wrap pass
 assert.match(app, /function highlightSql\(/, "SQL code blocks in answers should be syntax-colored");
 // ONE-SHOT: every ask sends exactly one user turn — no conversational memory,
@@ -76,7 +72,6 @@ assert.match(sandbox, /async function execForCheck\(/, "the sandbox should expos
 // Esc closes only the notes and restores the normal UI — never hides the sidebar
 assert.match(app, /function panicHide\(/, "Esc should close the notes and restore the normal UI");
 assert.doesNotMatch(app, /classList\.add\("viewer-only"\)/, "Esc must not hide the search sidebar");
-assert.match(app, /const pastedTask = q\.length >= 160;/, "pasted tasks should skip weak slide-image overhead");
 // resilience + rapid-fire flow
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");
 assert.match(app, /askQueue\.shift\(\)/, "questions pasted while streaming should queue and fire automatically");
@@ -117,23 +112,14 @@ assert.match(
 );
 assert.match(
   app,
-  /let citationSlides = \[\];/,
-  "streaming answers should track the exact slides that were sent as context"
+  /const cited = imgs\.map\(\(im\) => im\.page && slideByPage\(im\.page\)\)\.filter\(Boolean\);/,
+  "only a pasted slide region is eligible for a citation check"
 );
+assert.doesNotMatch(app, /pickedSlides/, "search hits are not sent with the question");
 assert.match(
   app,
-  /const pickedSlides = res\.results\.slice\(0,\s*12\);/,
-  "text questions should keep a concrete candidate slide list for citation checks"
-);
-assert.match(
-  app,
-  /citationSlides = pickedSlides\.map\(\(r\) => data\.slides\[r\.docId\]\)\.filter\(Boolean\);/,
-  "citation checks should use only the candidate slides sent to the model"
-);
-assert.match(
-  app,
-  /SlideSearchEngine\.verifyCitations\(assistantTurn\.content,\s*citationSlides,\s*\{\s*\n?\s*trustedPages:/,
-  "streaming answers should verify final slide citations against candidate slides, trusting image-attached pages"
+  /SlideSearchEngine\.verifyCitations\(assistantTurn\.content,\s*cited,/,
+  "a citation is checked only against a slide the user actually pasted"
 );
 
 console.log("client provider checks passed");

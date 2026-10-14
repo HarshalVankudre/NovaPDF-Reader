@@ -223,11 +223,11 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
       const b = call.body;
       const imgs = b.messages[0].content.filter((x) => x.type === "image");
       check("request: model/effort/thinking/max_tokens as configured",
-        b.model === "claude-fable-5" && b.output_config.effort === "high" && b.thinking.type === "adaptive" &&
+        b.model === "claude-haiku-5-5" && b.output_config.effort === "high" && b.thinking.type === "adaptive" &&
         b.thinking.display === "summarized" && b.max_tokens === 64000 && !("temperature" in b),
         `${b.model} effort=${b.output_config.effort} thinking=${JSON.stringify(b.thinking)} max_tokens=${b.max_tokens}`);
-      check("request: refusal fallback to Opus 4.8 via beta header",
-        JSON.stringify(b.fallbacks) === '[{"model":"claude-opus-4-8"}]' && /server-side-fallback-2026-06-01/.test(call.headers["anthropic-beta"] || ""));
+      check("request: Haiku streams without the Fable refusal-fallback beta",
+        !b.fallbacks && !/server-side-fallback-2026-06-01/.test(call.headers["anthropic-beta"] || ""));
       check("request: system prompt is the notes prompt (stealth rule present)", /course notes \("Notizen"\)/.test(b.system) && /never mention being an AI/.test(b.system));
       check("request: top BM25 slides sent as text", providedPages(call.text).length === 12, providedPages(call.text).length + " slides");
       check("request: top slides attached as rendered images (vision)", imgs.length >= 3 && imgs.every((x) => x.source.media_type === "image/jpeg" && x.source.data.length > 50000),

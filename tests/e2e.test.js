@@ -238,7 +238,7 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
         refs.includes(call.cite) && !refs.includes(call.bogus), "links: " + refs.join(",") + " (cited " + call.cite + " + bogus " + call.bogus + ")");
     } else {
       check("live answer arrives without an error", ans.length > 40 && !/Fehler|abgelehnt/.test(ans), JSON.stringify(ans.slice(0, 160)));
-      check("live answer cites real slides (or marks itself allg.)", refs.every((p) => p >= 1 && p <= 317) && (refs.length > 0 || /allg\./.test(ans)), "links: " + (refs.join(",") || "none"));
+      check("live answer cites only real slides, and only when a slide confirms it", refs.every((p) => p >= 1 && p <= 317), "links: " + (refs.join(",") || "none"));
     }
     const sqlRes = await waitFor(() => page.$eval(".nt-sql-result", (e) => e.innerText).catch(() => null), LIVE ? 20000 : 10000, "inline sql result").catch(() => "");
     check("read-only SQL in the answer auto-runs against the snapshot (3 Kunden)", /\b3\b/.test(sqlRes) && !/Fehler|error/i.test(sqlRes), sqlRes.replace(/\s+/g, " "));

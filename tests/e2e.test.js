@@ -228,11 +228,11 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
         `${b.model} effort=${b.output_config.effort} thinking=${JSON.stringify(b.thinking)} max_tokens=${b.max_tokens}`);
       check("request: refusal fallback to Opus 4.8 via beta header",
         JSON.stringify(b.fallbacks) === '[{"model":"claude-opus-4-8"}]' && /server-side-fallback-2026-06-01/.test(call.headers["anthropic-beta"] || ""));
-      check("request: system prompt is the notes prompt (stealth rule present)", /course notes \("Notizen"\)/.test(b.system) && /never mention being an AI/.test(b.system));
+      check("request: system prompt is the notes prompt (stealth rule present)", /course notes \("Notizen"\)/.test(b.system) && /never mention being an AI/i.test(b.system));
       check("request: top BM25 slides sent as text", providedPages(call.text).length === 12, providedPages(call.text).length + " slides");
       check("request: top slides attached as rendered images (vision)", imgs.length >= 3 && imgs.every((x) => x.source.media_type === "image/jpeg" && x.source.data.length > 50000),
         imgs.length + " images, " + imgs.map((x) => Math.round(x.source.data.length / 1024) + "KB").join("/"));
-      check("request: imported DB schema + dialect included", /Importiertes Datenbank-Schema \(Dialekt: SQLite/.test(call.text) && /kunde/.test(call.text) && /bestellung/.test(call.text));
+      check("request: imported DB schema + dialect included", /Schema \(SQLite\)/.test(call.text) && /kunde/.test(call.text) && /bestellung/.test(call.text));
       check("answer streams into the Notizen pane (markdown rendered)", /3NF:/.test(ans) && (await page.$(".nt-a strong")) !== null);
       check("citation check keeps the provided slide and strips the unprovided one",
         refs.includes(call.cite) && !refs.includes(call.bogus), "links: " + refs.join(",") + " (cited " + call.cite + " + bogus " + call.bogus + ")");

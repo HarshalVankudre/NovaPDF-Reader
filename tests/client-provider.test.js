@@ -70,6 +70,7 @@ assert.match(app, /async function crossCheckAnswer\(/, "answers should be cross-
 assert.match(app, /function normalizeVerdictText\(/, "identical results should confirm without an extra call");
 assert.match(app, /"GLEICH"/, "the compare verdict protocol should exist");
 assert.match(app, /Schiedsprüfung/, "conflicts should be settled by an arbiter solve");
+assert.doesNotMatch(app, /Im Bild steht die gesamte Aufgabe/, "image asks must not carry a second instruction");
 assert.match(app, /async function sqlEvidenceFor\(/, "SQL answers should be checked against real execution evidence");
 assert.match(sandbox, /async function execForCheck\(/, "the sandbox should expose the silent evidence executor");
 // Esc closes only the notes and restores the normal UI — never hides the sidebar
@@ -86,6 +87,8 @@ assert.match(app, /assistantTurn\.content = acc \? acc \+ /, "a failed/aborted s
 assert.match(app, /postQ\(\[\{ role: "user", content: adjBlocks \}\], "xhigh"\)/,
   "the arbiter should run at maximum reasoning depth");
 const serve = fs.readFileSync(path.join(ROOT, "serve.js"), "utf8");
+assert.doesNotMatch(serve, /const SYSTEM_PROMPT/, "there is one system prompt");
+assert.match(serve, /const CHAT_SYSTEM =/, "the notes prompt is the only system prompt");
 assert.match(serve, /function normalizeEffort\(/, "the server should whitelist client effort overrides");
 assert.match(serve, /normalizeEffort\(payload && payload\.effort\)/, "the /q payload effort should be honored");
 // Fable 5 refusal safety net: a classifier decline is re-served by Opus 4.8

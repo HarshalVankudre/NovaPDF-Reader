@@ -1049,76 +1049,45 @@
         ))).filter(Boolean);
       }
 
-      // attached .sql/text files → a context block appended to the prompt
-      let filesText = "";
-      if (files.length) {
-        filesText = "\n\n--- Angehängte Datei(en) (vom Nutzer eingefügt) ---\n" +
-          files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n");
+      // One message for every ask: the task, then data (files, slides, schema).
+      // How to answer lives only in CHAT_SYSTEM — nothing here is a second instruction.
+      let pictures = visionImages;
+      const snipPages = Array.from(new Set(imgs.map((im) => im.page).filter(Boolean)));
+      if (isImageAsk && snipPages.length && imgs.every((im) => im.page)) {
+        citationSlides = snipPages.map((p) => slideByPage(p)).filter(Boolean);
+        slidesText = citationSlides.map((s) =>
+          "[Folie " + s.page + " | " + (s.lecture || "") + " | " + (s.title || "") + "]\n" +
+          String(s.text || "").slice(0, 1000)).join("\n\n");
+        pictures = imgs;
+      } else if (isImageAsk) {
+        pictures = imgs;
       }
 
-      // imported DB schema + active dialect — sent with EVERY ask (screenshots too:
-      // a photographed SQL task still needs the real table/column names to be solvable)
-      let schemaBlock = "";
+      let schemaText = "";
+      let dialect = "";
       try {
         if (window.SqlSandbox && SqlSandbox.schemaText) {
-          const schema = await SqlSandbox.schemaText();
-          if (schema) {
-            const dialect = (SqlSandbox.engineName && SqlSandbox.engineName()) || "SQL";
-            schemaBlock = "\n\n--- Importiertes Datenbank-Schema (Dialekt: " + dialect +
-              " — nutze GENAU diese Tabellen-/Spaltennamen) ---\n" + schema;
-          }
+          schemaText = await SqlSandbox.schemaText() || "";
+          if (schemaText) dialect = (SqlSandbox.engineName && SqlSandbox.engineName()) || "SQL";
         }
       } catch (e) {}
 
-      // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
-      let textPart;
-      const snipPages = Array.from(new Set(imgs.map((im) => im.page).filter(Boolean)));
-      if (isImageAsk && snipPages.length && imgs.every((im) => im.page)) {
-        // every image is a region snipped from a slide (Alt+drag) → ground the
-        // answer in the source slide's text AND pixels, and allow its citation
-        citationSlides = snipPages.map((p) => slideByPage(p)).filter(Boolean);
-        const ctx = citationSlides.map((s) =>
-          "[Folie " + s.page + " | " + (s.lecture || "") + " | " + (s.title || "") + "]\n" +
-          String(s.text || "").slice(0, 1000)).join("\n\n");
-        textPart = (q ? q + "\n\n" : "Erkläre präzise und so knapp wie möglich, was der markierte Ausschnitt zeigt und bedeutet.\n\n") +
-          "Der Ausschnitt stammt von Folie " + snipPages.join(", ") + "." +
-          (ctx ? "\n\n--- Text der Quell-Folie(n) (Kontext) ---\n" + ctx : "") +
-          filesText + schemaBlock +
-          "\n\nSchließe mit \"(Folie " + snipPages.join(", Folie ") + ")\".";
-      } else if (isImageAsk) {
-        textPart = (q ? q + "\n\n" : "") +
-          "Im Bild steht die gesamte Aufgabe. Lies sie vollständig (auch Tabellen und Diagramme) und gib NUR die Lösung — " +
-          "direkt, alle Teilaufgaben, so knapp wie möglich zum schnellen Ablesen. " +
-          "Wähle selbst das übersichtlichste Format passend zur Aufgabe (Markdown wird angezeigt: Stichpunkte, nummerierte Zeilen, Tabellen, ```sql-Blöcke …). " +
-          "Kein Erklärtext (außer die Aufgabe verlangt ihn), kein Wiederholen der Aufgabe, keine Folien-Zitate." +
-          filesText + schemaBlock;
-      } else {
-        // with a file but no typed question, ask the model to solve/explain it
-        const ask = q || (files.length
-          ? "Beantworte die Aufgabe aus der/den angehängten Datei(en). Enthält sie keine Frage, erkläre kurz und präzise, was der SQL-Code tut."
-          : "");
-        textPart = ask + filesText +
-          (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
-          schemaBlock +
-          (visionImages.length ? "\n\n(Die wichtigsten Folien folgen als Bilder, jeweils mit ihrer Foliennummer beschriftet — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
+      const chunks = [];
+      if (q) chunks.push(q);
+      if (files.length) {
+        chunks.push(files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n"));
       }
+      if (slidesText) chunks.push(slidesText);
+      if (schemaText) chunks.push("Schema (" + dialect + "):\n" + schemaText);
+      const textPart = chunks.join("\n\n");
 
-      // neutral content blocks: text, then images — each image preceded by a short
-      // label so the model knows which Folie (or screenshot) it is looking at and
-      // its citations stay precise
-      const blocks = [{ type: "text", text: textPart }];
-      if (isImageAsk) {
-        imgs.forEach((im, i) => {
-          if (im.page) blocks.push({ type: "text", text: "Ausschnitt von Folie " + im.page + ":" });
-          else if (imgs.length > 1) blocks.push({ type: "text", text: "Screenshot " + (i + 1) + ":" });
-          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-        });
-      } else {
-        for (const im of visionImages) {
-          blocks.push({ type: "text", text: "Bild von Folie " + im.page + ":" });
-          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-        }
-      }
+      const blocks = [];
+      if (textPart) blocks.push({ type: "text", text: textPart });
+      pictures.forEach((im, i) => {
+        if (im.page) blocks.push({ type: "text", text: "Bild von Folie " + im.page });
+        else if (pictures.length > 1) blocks.push({ type: "text", text: "Screenshot " + (i + 1) });
+        blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+      });
 
       // ONE-SHOT mode: there is no conversation. Every question stands alone —
       // no prior Q/A pairs are sent to the model, and asking wipes the previous
@@ -1616,8 +1585,7 @@
     document.addEventListener("sqlfix", (e) => {
       const d = (e && e.detail) || {};
       if (!d.sql || aiStreaming) return;
-      qInput.value = "Diese SQL schlägt auf der importierten Datenbank fehl — korrigiere sie. Gib NUR die korrigierte, lauffähige Abfrage.\n```sql\n" +
-        d.sql + "\n```\nFehlermeldung: " + (d.error || "");
+      qInput.value = "```sql\n" + d.sql + "\n```\n" + (d.error || "");
       runAsk();
     });
     let resizeTimer = null;

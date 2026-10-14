@@ -60,6 +60,8 @@ One model: provider id `opus` (historical name), model `claude-fable-5`, `kind: 
 
 There is one system prompt, `CHAT_SYSTEM` in `serve.js`, used by both `/q` and `/llm`. The tutor solves the task; attached slides are a check, not the source of the answer. The user message is only the task plus data (slides, images, files, schema). Do not add a second instruction paragraph per input type, and do not make the answer depend on the slides covering the question. Shouted MUST/NEVER rules over-apply. The notes pane stays unbranded.
 
+Haiku 5.5 bills a prompt at the low rate up to 100k tokens and about 5× above that. `fitForPriceTier` aims for 90k (headroom under the cliff) by dropping extra slide-text checks and extra "Bild von Folie" images. It does not refuse, and it does not drop the question, screenshots, files, or schema — a task that itself exceeds 100k is sent whole.
+
 Changing the model means editing **two places in sync**:
 - the `opus` provider (id, model, key, kind) in `llm-config.js`
 - the `AI_PROVIDER` constant in `assets/app.js`

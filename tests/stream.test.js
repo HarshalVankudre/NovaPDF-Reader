@@ -11,7 +11,61 @@ const path = require("path");
 process.env.SLIDEFINDER_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "db-slide-stream-"));
 const origLog = console.log;
 console.log = () => {};
-const { streamWithFallback, isTransientError } = require("../serve.js");
+const { streamWithFallback, isTransientError, fitForPriceTier, CONTEXT_TARGET_TOKENS, PRICE_CLIFF_TOKENS } = require("../serve.js");
+
+function fakePng(w, h) {
+  const b = Buffer.alloc(24);
+  b[0] = 0x89; b[1] = 0x50; b[2] = 0x4e; b[3] = 0x47;
+  b[4] = 0x0d; b[5] = 0x0a; b[6] = 0x1a; b[7] = 0x0a;
+  b.writeUInt32BE(w, 16);
+  b.writeUInt32BE(h, 20);
+  return b.toString("base64");
+}
+
+{
+  const small = fitForPriceTier([{ role: "user", content: "Was ist 3NF?" }], "system");
+  assert.strictEqual(small.trimmed, false, "a short question is sent as-is");
+  assert.strictEqual(small.extended, false);
+  assert.ok(small.tokens < CONTEXT_TARGET_TOKENS);
+}
+{
+  const slides = [];
+  for (let i = 1; i <= 12; i++) slides.push("[Folie " + i + " | VL | t]\n" + "x".repeat(40000));
+  const text = "Was ist 3NF?\n\n" + slides.join("\n\n") + "\n\nSchema (SQLite):\nkunde(id)";
+  const fitted = fitForPriceTier([{ role: "user", content: text }], "You write the course notes.");
+  assert.strictEqual(fitted.trimmed, true, "extra slide text is dropped to stay in the cheaper tier");
+  assert.ok(fitted.tokens <= CONTEXT_TARGET_TOKENS, "fitted prompt is under the 90k target, got " + fitted.tokens);
+  assert.ok(fitted.messages[0].content.indexOf("Was ist 3NF?") === 0, "the question stays");
+  assert.ok(/Schema \(SQLite\)/.test(fitted.messages[0].content), "the schema stays");
+}
+{
+  const huge = fakePng(12000, 12000);
+  const blocks = [
+    { type: "text", text: "Lies die Aufgabe im Bild." },
+    { type: "text", text: "Bild von Folie 10" },
+    { type: "image", media_type: "image/png", data: huge },
+    { type: "text", text: "Bild von Folie 11" },
+    { type: "image", media_type: "image/png", data: huge },
+    { type: "image", media_type: "image/png", data: huge },
+  ];
+  const fitted = fitForPriceTier([{ role: "user", content: blocks }], "system");
+  const imgs = fitted.messages[0].content.filter((b) => b.type === "image");
+  const labels = fitted.messages[0].content.filter((b) => b.type === "text" && /Bild von Folie/.test(b.text));
+  assert.strictEqual(fitted.trimmed, true, "an extra reference image is dropped");
+  assert.strictEqual(labels.length, 1, "the first slide check image is kept");
+  assert.strictEqual(imgs.length, 2, "the screenshot is kept along with one slide image");
+  assert.ok(/Lies die Aufgabe/.test(fitted.messages[0].content[0].text));
+}
+{
+  const only = fitForPriceTier([{
+    role: "user",
+    content: [{ type: "image", media_type: "image/png", data: fakePng(12000, 12000) }],
+  }], "system");
+  assert.strictEqual(only.trimmed, false, "a task that itself exceeds 100k is not cut");
+  assert.strictEqual(only.extended, true);
+  assert.ok(only.tokens > PRICE_CLIFF_TOKENS);
+  assert.strictEqual(only.messages[0].content.length, 1);
+}
 
 const PAYLOAD = { provider: "opus", messages: [{ role: "user", content: "Was ist 3NF?" }] };
 const KEYS = { opus: "test-key" };

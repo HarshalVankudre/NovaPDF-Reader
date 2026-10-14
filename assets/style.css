@@ -513,6 +513,10 @@ body.viewer-only .sidebar { display: none; }
 .sbx-table tr:nth-child(even) td { background: #fbfcfd; }
 .sbx-null { color: var(--muted-2); font-style: italic; }
 .sbx-count { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+.sbx-link { border: 0; background: transparent; padding: 0; color: var(--green-darker); font: inherit; font-weight: 700; cursor: pointer; }
+.sbx-link:hover { text-decoration: underline; }
+.sbx-table tbody td { cursor: copy; }
+.sbx-table td.sbx-copied { background: #e5f6ee !important; }
 .sbx-busy .sbx-run { opacity: .6; pointer-events: none; }
 .sbx-fix { margin-top: 8px; }
 .nt-sql-result .sbx-fix { margin: 6px 0 0; padding: 5px 12px; font-size: 12px; }

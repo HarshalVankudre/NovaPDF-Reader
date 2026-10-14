@@ -24,6 +24,9 @@
   let snapshotName = "";
   let lastTableCount = 0;
   let autoTried = false;    // only auto-load the snapshot once per session
+  let queryHist = [];       // session only — exam queries stay out of localStorage
+  let histAt = -1;
+  let histDraft = "";
 
   const SQLITE_MAGIC = "SQLite format 3"; // 15 chars; the 16th header byte is a NUL
   function isSqliteBytes(buf) {
@@ -190,9 +193,23 @@
     }
     return sqliteQuery(sql);
   }
+  function normSql(s) {
+    return String(s || "").replace(/\s+/g, " ").trim().replace(/;\s*$/, "").toLowerCase();
+  }
+  // The lectures teach MySQL (DATEDIFF, CURDATE, YEAR, HOUR, …). On the SQLite
+  // fallback those queries would fail, so translate them just before execution.
   function sqliteQuery(sql) {
     const db = sqlite.db;
-    const res = db.exec(sql);
+    const adapted = U.adaptMysql ? U.adaptMysql(sql) : sql;
+    let res;
+    try { res = db.exec(adapted); }
+    catch (e) {
+      const msg = (e && e.message) || "Abfrage fehlgeschlagen";
+      if (normSql(adapted) && normSql(adapted) !== normSql(sql)) {
+        throw new Error(msg + "\nSQLite: " + String(adapted).trim());
+      }
+      throw e;
+    }
     if (res.length) return res.map((r) => ({ columns: r.columns, rows: r.values, rowCount: r.values.length }));
     let mod = 0; try { mod = db.getRowsModified(); } catch (e) {}
     return [{ columns: ["Ergebnis"], rows: [["OK · " + mod + " Zeile(n) geändert"]], rowCount: 0 }];
@@ -206,11 +223,66 @@
       const body = (s.rows || []).map((row) =>
         "<tr>" + row.map((cell) => "<td>" + (cell == null ? '<span class="sbx-null">NULL</span>' : esc(cell)) + "</td>").join("") + "</tr>"
       ).join("");
-      const count = '<div class="sbx-count">' + (s.rowCount || 0) + " Zeile(n)</div>";
+      const count = '<div class="sbx-count">' + (s.rowCount || 0) + " Zeile(n)" +
+        ((s.rows && s.rows.length) ? ' · <button type="button" class="sbx-link sbx-copyset">Tabelle kopieren</button>' : "") +
+        "</div>";
       return '<div class="sbx-set"><div class="sbx-tablewrap"><table class="sbx-table"><thead>' + head + "</thead><tbody>" + body + "</tbody></table></div>" + count + "</div>";
     }).join("");
   }
   function showResult(html) { if (resultsEl) resultsEl.innerHTML = html; }
+  function setsToTsv(s) {
+    const lines = [];
+    if (s.columns && s.columns.length) lines.push(s.columns.map((c) => String(c)).join("\t"));
+    for (const row of s.rows || []) lines.push(row.map((c) => (c == null ? "NULL" : String(c))).join("\t"));
+    return lines.join("\n");
+  }
+  function copyText(text, btn) {
+    const flash = () => {
+      if (!btn) return;
+      const prev = btn.textContent;
+      btn.textContent = "kopiert";
+      setTimeout(() => { btn.textContent = prev; }, 900);
+    };
+    const fallback = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = String(text);
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        ta.remove();
+        flash();
+      } catch (e) {}
+    };
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(String(text)).then(flash, fallback);
+      else fallback();
+    } catch (e) { fallback(); }
+  }
+  function bindResultActions(root, sets) {
+    if (!root) return;
+    root.querySelectorAll(".sbx-copyset").forEach((btn, i) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        copyText(setsToTsv(sets[i] || { columns: [], rows: [] }), btn);
+      });
+    });
+    root.querySelectorAll("tbody td").forEach((td) => {
+      td.title = "Klicken kopiert den Wert";
+      td.addEventListener("click", () => {
+        copyText(td.querySelector(".sbx-null") ? "NULL" : td.textContent, null);
+        td.classList.add("sbx-copied");
+        setTimeout(() => td.classList.remove("sbx-copied"), 700);
+      });
+    });
+  }
+  function showSets(sets) {
+    showResult(setTableHtml(sets));
+    bindResultActions(resultsEl, sets);
+  }
   function errHtml(msg) { return '<div class="sbx-err">' + esc(msg) + "</div>"; }
   // One-click repair: a failed statement is handed to the tutor ("Notizen"),
   // which answers with a corrected query — read-only results even run themselves.
@@ -265,8 +337,8 @@
       '<button class="sbx-btn sbx-ghost sbx-snap" hidden>Exam-DB laden</button>' +
       '<button class="sbx-btn sbx-ghost sbx-import">Als DB importieren</button>' +
       '<label class="sbx-btn sbx-ghost sbx-file">Datei…<input type="file" multiple accept=".sqlite,.sqlite3,.db,.sql,.csv,.txt" hidden></label>' +
-      '<span class="sbx-hint">.sqlite / Dump / CSV hierher ziehen · Strg+Enter</span></div>' +
-      '<textarea class="sbx-editor" spellcheck="false" placeholder="SELECT * FROM ...   (oder Dump einfügen und „Als DB importieren“)"></textarea>' +
+      '<span class="sbx-hint">.sqlite / Dump / CSV · Strg+Enter · Alt+↑</span></div>' +
+      '<textarea class="sbx-editor" spellcheck="false" title="Strg+Enter ausführen · Alt+↑ / Alt+↓ vorherige Abfragen" placeholder="SELECT * FROM ...   (oder Dump einfügen und „Als DB importieren“)"></textarea>' +
       '<div class="sbx-results" id="sbxResults"><div class="sbx-empty">Noch keine Abfrage. Importiere zuerst die Datenbank.</div></div>';
     document.body.appendChild(backdrop);
     document.body.appendChild(panel);
@@ -283,8 +355,14 @@
     panel.querySelector(".sbx-file input").addEventListener("change", (e) => { doImport(() => importFiles(e.target.files)); e.target.value = ""; });
 
     editorEl.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runFromEditor(); }
-      if (e.key === "Escape") { e.preventDefault(); close(); }
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); runFromEditor(); return; }
+      if (e.key === "Escape") { e.preventDefault(); close(); return; }
+      if (e.altKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        e.preventDefault();
+        recallQuery(e.key === "ArrowUp" ? -1 : 1);
+      } else if (!e.altKey && e.key !== "ArrowUp" && e.key !== "ArrowDown") {
+        histAt = -1;
+      }
     });
     // drag & drop a dump / CSVs onto the panel
     ["dragover", "dragenter"].forEach((ev) => panel.addEventListener(ev, (e) => { e.preventDefault(); panel.classList.add("sbx-drag"); }));
@@ -343,14 +421,22 @@
   function copyEditor() {
     const text = editorEl ? editorEl.value : "";
     if (!text.trim()) return;
-    const btn = panel && panel.querySelector(".sbx-copy");
-    const restore = btn ? btn.textContent : "";
-    const ok = () => { if (btn) { btn.textContent = "✓ Kopiert"; setTimeout(() => { btn.textContent = restore; }, 1200); } };
-    const fallback = () => { try { editorEl.focus(); editorEl.select(); document.execCommand("copy"); ok(); } catch (e) {} };
-    try {
-      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(String(text)).then(ok, fallback);
-      else fallback();
-    } catch (e) { fallback(); }
+    copyText(text, panel && panel.querySelector(".sbx-copy"));
+  }
+  function rememberQuery(sql) {
+    const t = String(sql || "").trim();
+    if (!t) return;
+    if (queryHist[queryHist.length - 1] !== t) queryHist.push(t);
+    if (queryHist.length > 40) queryHist.shift();
+    histAt = -1;
+  }
+  function recallQuery(dir) {
+    if (!queryHist.length || !editorEl) return;
+    if (histAt === -1) histDraft = editorEl.value;
+    if (dir < 0) histAt = histAt === -1 ? queryHist.length - 1 : Math.max(0, histAt - 1);
+    else histAt = histAt < 0 ? -1 : histAt + 1;
+    if (histAt < 0 || histAt >= queryHist.length) { histAt = -1; editorEl.value = histDraft; }
+    else editorEl.value = queryHist[histAt];
   }
   async function runFromEditor() {
     const sql = editorEl.value.trim();
@@ -358,8 +444,9 @@
     build(); busy(true, "Führe aus…");
     try {
       const sets = await runSql(sql);
+      rememberQuery(sql);
       updateEngineBadge();
-      showResult(setTableHtml(sets));
+      showSets(sets);
     } catch (e) {
       const msg = (e && e.message) || "Abfrage fehlgeschlagen";
       showResult(errHtml(msg));
@@ -397,6 +484,7 @@
     try {
       const sets = await runSql(sql);
       out.innerHTML = setTableHtml(sets);
+      bindResultActions(out, sets);
     } catch (e) {
       const msg = (e && e.message) || "Fehler";
       out.innerHTML = errHtml(msg);

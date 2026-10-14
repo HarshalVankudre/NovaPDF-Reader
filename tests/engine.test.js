@@ -47,6 +47,8 @@ const CASES = [
   // --- exam-topic coverage, phrase ordering, and SQL-keyword search (added) ---
   { q: "INNER JOIN", expect: [[247, 260]] },
   { q: "LEFT OUTER JOIN", expect: [[247, 260]] },
+  { q: "LEFT JOIN", expect: [[253, 253]] },   // not the RIGHT JOIN slide, which also says "LEFT JOIN"
+  { q: "RIGHT JOIN", expect: [[254, 254]] },
   { q: "kartesisches Produkt", expect: [[238, 260]] },
   { q: "ORDER BY absteigend", expect: [[207, 274]] },
   { q: "SELECT DISTINCT", expect: [[207, 274]] },

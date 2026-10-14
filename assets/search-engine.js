@@ -100,7 +100,11 @@
     ["alias", "aliasname", "umbenennen", "as"],
     ["subquery", "unterabfrage", "subselect", "verschachtelt", "geschachtelt", "nested"],
     ["inner", "innerjoin", "innerer"],
-    ["outer", "outerjoin", "ausserer", "left", "right", "leftjoin", "rightjoin"],
+    ["outer", "outerjoin", "ausserer"],
+    // LEFT and RIGHT are different slides. Treating them as synonyms ranked
+    // "LEFT JOIN" onto the RIGHT JOIN slide, which repeats the words "LEFT JOIN".
+    ["left", "leftjoin"],
+    ["right", "rightjoin"],
     ["natural", "naturaljoin", "naturlich"],
     ["cross", "crossjoin", "kartesisch", "kreuzprodukt"],
     ["funktional", "abhangigkeit", "fd", "determiniert", "determinante"],

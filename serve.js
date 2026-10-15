@@ -13,6 +13,15 @@ const {
   buildOpenAIRequestBody,
 } = require("./llm-config");
 const SqlUtil = require("./assets/sql-util.js");
+const {
+  fitTutorTurn,
+  messageTokens,
+  textTokens,
+  imageTokens,
+  CONTEXT_LIMIT,
+  CONTEXT_TARGET,
+  MAX_TOKENS,
+} = require("./assets/token-budget.js");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -145,25 +154,12 @@ const LLM = createLLMConfig(CONFIG_DIR, CONFIG);
 const KEYS = LLM.keys;
 const PROVIDERS = LLM.providers;
 
-const SYSTEM_PROMPT =
-  'You are a precise study assistant for the German university database course ' +
-  '"DSCB140 - Datenbanken & Datenkunde". You receive a student QUESTION and several candidate ' +
-  'lecture SLIDES (each with a global page number, its lecture, a title, and extracted text). ' +
-  'Identify which slide(s) best answer the question, then write the answer GROUNDED ' +
-  'ONLY in those slides - never invent facts not present in them. Answer in the SAME language as ' +
-  'the question. Give ONLY the answer - the bare value/term/correct option, no preamble and no ' +
-  'restating; at most one short sentence unless the task is inherently multi-part. If none of the ' +
-  'slides answer it, say so in a few words and use an empty slides list. Return ONLY a JSON object ' +
-  '(no markdown, no code fences) of the exact ' +
-  'form: {"answer": "...", "slides": [<global page numbers you actually used, most relevant first>]}';
-
 function buildUserPrompt(question, candidates) {
-  let s = "QUESTION: " + question + "\n\nCANDIDATE SLIDES:\n";
-  for (const c of candidates) {
-    s += "\n[S." + c.page + " | " + (c.lecture || "") + " | " + (c.title || "") + "]\n" +
-         String(c.text || "").slice(0, 800) + "\n";
-  }
-  return s;
+  const slides = (candidates || []).map((c) =>
+    "[Folie " + c.page + " | " + (c.lecture || "") + " | " + (c.title || "") + "]\n" +
+    String(c.text || "").slice(0, 1000)
+  ).join("\n\n");
+  return [String(question || "").trim(), slides].filter(Boolean).join("\n\n");
 }
 
 function parseAnswer(raw) {
@@ -202,8 +198,6 @@ async function askOpenAICompatible(p, key, system, user) {
     body: JSON.stringify(buildOpenAIRequestBody(p, {
       messages: [{ role: "system", content: system }, { role: "user", content: user }],
       max_tokens: 1024,
-      temperature: 0.2,
-      response_format: { type: "json_object" },
     })),
   });
   if (!resp.ok) {
@@ -224,70 +218,26 @@ async function askLLM(question, candidates) {
     const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
   }
-  const user = buildUserPrompt(question, candidates);
+  const fitted = fitTutorTurn([{ role: "user", content: buildUserPrompt(question, candidates) }], CHAT_SYSTEM);
+  const user = fitted.messages[0].content;
   const t0 = Date.now();
-  const out = p.kind === "anthropic" ? await askAnthropic(p, key, SYSTEM_PROMPT, user) : await askOpenAICompatible(p, key, SYSTEM_PROMPT, user);
+  const out = p.kind === "anthropic" ? await askAnthropic(p, key, CHAT_SYSTEM, user) : await askOpenAICompatible(p, key, CHAT_SYSTEM, user);
   const parsed = parseAnswer(out.raw);
   return { answer: parsed.answer, slides: parsed.slides, model: out.model, label: p.label, ms: Date.now() - t0 };
 }
 
-// ---- streaming tutor chat ----
-// Written for Fable 5: it follows the system prompt closely, so rules are
-// stated once, at normal volume, with the reason beside them (shouted
-// MUST/NEVER rules over-apply on current models). The stealth constraint
-// (never mention being an AI / generated text) is load-bearing.
+// One prompt for every request (/q and /llm). Stated once, at normal volume:
+// shouted rules over-apply. The stealth line is load-bearing.
 const CHAT_SYSTEM =
-  'You write the course notes ("Notizen") for the German university database course ' +
-  '"DSCB140 - Datenbanken & Datenkunde" (lectures VL1-VL7, 317 slides with global slide numbers). ' +
-  'The reader is a student working through tasks from this course who reads the answer straight off the ' +
-  'screen, so an answer has to be complete, correct and quick to scan.\n' +
+  'You write the course notes ("Notizen") for a database exam. The reader wants the answer. ' +
+  'Each message is one question. It may include a screenshot of the question and attached files. There is no earlier conversation.\n' +
   '\n' +
-  'A question may come with slide excerpts as text, the most relevant slides as images (each labeled ' +
-  '"Bild von Folie N"), a pasted task screenshot, attached files (e.g. .sql), and the imported database ' +
-  'schema with its SQL dialect. Every question stands alone - there is no conversation - so each answer ' +
-  'is self-contained and never refers to earlier notes or answers.\n' +
+  'Answer every part, in the question\'s language, starting with the answer. Be direct. No preamble and no recap. Explain only when the question asks for an explanation.\n' +
   '\n' +
-  'Solving the task\n' +
-  'The typed or pasted task (text or screenshot) is the subject; the slides are reference material. Answer ' +
-  'every part the task asks for: each sub-question (a, b, c, ...), each requested deliverable, each condition ' +
-  'such as "alle Spalten", "beide Richtungen" or "nennen Sie drei". When the task numbers its parts ("(1) ..., ' +
-  '(2) ...", "a) b) c)"), mirror that numbering so each part is visibly answered, in order. When it asks for N ' +
-  'items, write out all N rather than ending on "etc.", "..." or "usw.". A missing part is a wrong answer for ' +
-  'that part even when everything stated is correct, which is why completeness comes before brevity.\n' +
-  'Ground the answer in the provided material where it covers the task. ER diagrams, cardinalities, table ' +
-  'contents and SQL on the slide images are often missing from the extracted text, so read the images. Copy ' +
-  'names, numbers and terminology character-exactly from the source and use the German terms the slides use, ' +
-  'since that is the vocabulary the course expects. Check the places where answers to these tasks typically go ' +
-  'wrong: every option of a multiple-choice question (several can be correct), both directions of a ' +
-  'relationship for cardinalities and (min,max) notation, the normal-form definitions against the given ' +
-  'attributes and dependencies, and any arithmetic.\n' +
-  'If the material does not cover the question, answer correctly from standard database knowledge and end ' +
-  'with "(allg.)" instead of a slide citation - a correct uncited answer is more useful than a refusal.\n' +
+  'If a database schema is attached, SQL uses those exact table and column names and that dialect, one ```sql block per query. ' +
+  'A number only the database can produce is that query, not a guess. A query sent with its error is answered by the corrected ```sql block only.\n' +
   '\n' +
-  'SQL\n' +
-  'Use exactly the table and column names from the provided schema: the query runs against that database, so ' +
-  'invented, translated or "corrected" names fail. Match the stated dialect (MySQL unless the context says ' +
-  'SQLite). Each sub-task that needs SQL gets its own complete, runnable statement in its own ```sql block, ' +
-  'with keywords in uppercase; if the task names a construct (JOIN, Subquery, HAVING, VIEW, ...), use it.\n' +
-  'When a sub-task asks for a value that only the data can produce (eine Summe, Anzahl, ein Ergebnis zum ' +
-  'Eintragen), write the query that computes it as its own ```sql block: read-only blocks run automatically ' +
-  'against the imported database and the value appears right under the block. That query is the answer to ' +
-  'that part - don\'t estimate the number yourself or point to DBeaver or another tool instead.\n' +
-  '\n' +
-  'Form (Markdown is rendered: bold, lists, tables, code blocks)\n' +
-  'Answer in the question\'s language. Start with the answer itself and stop once everything asked is ' +
-  'answered - no lead-in such as "Die Antwort ist" or "Laut Folie", no restating the question, no recap. ' +
-  'Explain only when the task asks for it (warum, erkläre, begründe, Herleitung/Schritte), and then briefly; ' +
-  'keeping it short never drops a requested part.\n' +
-  'Multiple choice: all correct options, verbatim. True/false: a verdict for every statement. Compute/derive ' +
-  'tasks: the result first, the derivation only if the task asks to show it.\n' +
-  'Choose the layout that reads fastest: a bare term when that answers it; a list, table or code block when it ' +
-  'genuinely speeds up scanning.\n' +
-  'End with the source as "(Folie N)" or "(Folie N, M)" with nothing after it - global slide numbers of ' +
-  'provided slides that actually support the answer (the app turns these into links and checks them against ' +
-  'the slides it sent, so a slide that was not provided must not be cited). Screenshot tasks need no citation.\n' +
-  '\n' +
-  'This is a notes document: never mention being an AI or a model, or that the text is generated.';
+  'Never mention being an AI or a model, or that the text is generated.';
 
 // Normalize the browser's neutral message blocks ({type:'text'|'image', ...}) to
 // each provider's wire format. Plain-string content is passed through untouched.
@@ -335,19 +285,28 @@ function normalizeEffort(e) {
   return EFFORTS.has(e) ? e : REASONING_EFFORT;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Haiku 5.5 is cheaper when the prompt stays under 100k tokens. fitTutorTurn
+// aims for 90k by dropping leftover slide checks only. A question, screenshot,
+// file, or schema that itself goes past 100k is sent whole. max_tokens is the
+// answer budget and is not part of that price tier.
 
 async function streamAnthropic(p, key, messages, write, signal, effort, onActivity) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
+  // streamWithFallback already fitted the turn. Fit again at the API call so a
+  // direct caller still cannot cross the ceiling. max_tokens is the reserved
+  // answer+thinking budget; thinking counts toward it.
+  const fitted = fitTutorTurn(messages, CHAT_SYSTEM);
+  messages = fitted.messages;
   // NOTE: do not add temperature/top_p/top_k — Fable 5 (and Opus 4.8) reject
   // non-default sampling params with a 400. Precision is steered via
   // CHAT_SYSTEM + effort. thinking:{type:"adaptive"} is accepted on both
   // (on Fable 5 thinking is always on anyway; never send {type:"disabled"}).
   const params = {
     model: p.model,
-    max_tokens: 64000,                              // thinking counts toward max_tokens; headroom so long multi-part answers at high effort aren't cut off
+    max_tokens: MAX_TOKENS,
     // "adaptive" is explicit on purpose — an Opus model via the models.opus
     // override would otherwise run without thinking. "summarized" makes the
     // stream carry thinking progress, which the stall detector uses as a
@@ -462,7 +421,13 @@ const RETRY_DELAY_MS = 1500;
 // opts.signal aborts the upstream request when the browser disconnects, so a
 // closed tab or a :stop doesn't keep a paid generation running.
 async function streamWithFallback(payload, res, opts = {}) {
-  const messages = payload.messages;
+  const fittedTurn = fitTutorTurn(payload && payload.messages, CHAT_SYSTEM);
+  const messages = fittedTurn.messages;
+  if (fittedTurn.trimmed || fittedTurn.extended) {
+    console.log("POST /q  fit " + fittedTurn.before + " -> " + fittedTurn.tokens +
+      " input tokens (target " + CONTEXT_TARGET + ", cheaper tier " + CONTEXT_LIMIT +
+      (fittedTurn.extended ? ", extended" : "") + ")");
+  }
   const effort = normalizeEffort(payload && payload.effort);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
   const clientSignal = opts.signal || null;
@@ -824,7 +789,19 @@ function handleRequest(req, res) {
 // The same handler runs in two modes: `node serve.js` starts the local HTTP
 // server below; on Vercel, api/index.js imports handleRequest and runs it as
 // a serverless function (no listen()).
-module.exports = { handleRequest, streamWithFallback, isTransientError };
+module.exports = {
+  handleRequest,
+  streamWithFallback,
+  isTransientError,
+  fitTutorTurn,
+  messageTokens,
+  textTokens,
+  imageTokens,
+  CONTEXT_LIMIT,
+  CONTEXT_TARGET,
+  MAX_TOKENS,
+  CHAT_SYSTEM,
+};
 
 if (require.main === module) {
   const server = http.createServer(handleRequest);

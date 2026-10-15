@@ -1,30 +1,14 @@
 /*
- * Token budget for one tutor turn (one question, one answer).
+ * Soft token budget for one tutor turn (one question, one answer).
  *
- * Anthropic requires input_tokens + max_tokens to fit the context window.
- * The hard ceiling is CONTEXT_LIMIT (100000). HEADROOM (20000) is never
- * filled, so the instruction prompt is not crowded out by images and text:
+ * Haiku 5.5 bills a prompt at the low rate up to 100k input tokens and about
+ * 5× above that. We AIM for CONTEXT_TARGET (90k) so the instruction still has
+ * room. Crossing 100k is allowed: the question, screenshots, files, and schema
+ * are never cut. Only leftover slide excerpts and extra "Bild von Folie" images
+ * are dropped, and only when the estimate is over the target.
  *
- *   input_estimate + max_tokens <= TOKEN_BUDGET (80000)
- *
- * MAX_TOKENS (32000) is reserved for adaptive thinking plus the answer.
- * Thinking counts toward max_tokens. The other 48000 (INPUT_BUDGET) is the
- * input: system prompt, question, files, schema, slide text, images.
- *
- * Estimates (rounded up):
- *   text  — ceil(chars / 4)
- *   image — ceil(width * height / 750), from the PNG, JPEG, or GIF header
- *           (no full decode). An unreadable image is billed over the input
- *           budget so it is dropped instead of being allowed past the ceiling.
- *
- * Trim order, stopping as soon as the input fits:
- *   1. images, last first, including a screenshot that does not fit
- *      (a "Bild von Folie N" or "Screenshot N" label goes with its image)
- *   2. slide text ([Folie N | …] sections), shortened from the end
- *   3. attached file text
- *   4. schema, only if it still does not fit
- *   5. the question text, only if it still does not fit
- * The system prompt is never edited.
+ * Estimates (rounded up): text ceil(chars / 4); image ceil(width × height / 750)
+ * from the PNG, JPEG, or GIF header. An unreadable image is estimated, not dropped.
  */
 (function (root, factory) {
   const mod = factory();
@@ -34,15 +18,9 @@
 })(this, function () {
   "use strict";
 
-  const CONTEXT_LIMIT = 100000;
-  const HEADROOM = 20000;
-  const TOKEN_BUDGET = CONTEXT_LIMIT - HEADROOM; // 80000
-  const MAX_TOKENS = 32000;
-  const INPUT_BUDGET = TOKEN_BUDGET - MAX_TOKENS; // 48000
-  // Client calls pass system="" and subtract this, so they trim at least as
-  // hard as the server (which counts the real system prompt inside INPUT_BUDGET).
-  // tests/stream.test.js checks the real prompt is within this reserve.
-  const SYSTEM_RESERVE = 2000;
+  const CONTEXT_LIMIT = 100000; // cheaper Haiku tier; a larger prompt is allowed
+  const CONTEXT_TARGET = 90000; // aim under the tier, with room for the instruction
+  const MAX_TOKENS = 64000;     // reserved answer + adaptive thinking; not part of the price tier
 
   const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   const B64I = new Int16Array(128);
@@ -152,7 +130,7 @@
   function imageTokensFromSize(w, h) {
     w = w | 0;
     h = h | 0;
-    if (w <= 0 || h <= 0) return INPUT_BUDGET + 1;
+    if (w <= 0 || h <= 0) return 16000;
     return Math.ceil((w * h) / 750);
   }
 
@@ -160,8 +138,8 @@
     const data = block && block.data ? String(block.data) : "";
     if (cache && cache.has(data)) return cache.get(data);
     const dim = dimensionsOf(block);
-    // Unreadable: over the input budget so the image is dropped, never billed short.
-    const tokens = dim ? imageTokensFromSize(dim.w, dim.h) : (INPUT_BUDGET + 1);
+    // Unreadable size: a finite estimate. The image itself is still sent.
+    const tokens = dim ? imageTokensFromSize(dim.w, dim.h) : 16000;
     if (cache) cache.set(data, tokens);
     return tokens;
   }
@@ -198,18 +176,19 @@
     });
   }
 
-  function dropLastImage(messages) {
+  function dropLastExtraRefImage(messages) {
     for (let mi = messages.length - 1; mi >= 0; mi--) {
       const content = messages[mi] && messages[mi].content;
       if (!Array.isArray(content)) continue;
-      for (let i = content.length - 1; i >= 0; i--) {
-        if (!content[i] || content[i].type !== "image") continue;
-        let from = i;
+      const refs = [];
+      for (let i = 1; i < content.length; i++) {
         const prev = content[i - 1];
-        if (prev && prev.type !== "image" && isImageLabel(prev.text)) from = i - 1;
-        content.splice(from, i - from + 1);
-        return true;
+        if (content[i] && content[i].type === "image" && prev && /^Bild von Folie \d+$/.test(String(prev.text || "").trim())) refs.push(i);
       }
+      if (refs.length < 2) continue;
+      const i = refs[refs.length - 1];
+      content.splice(i - 1, 2);
+      return true;
     }
     return false;
   }
@@ -345,27 +324,7 @@
     return changed;
   }
 
-  // Last resort so a parse miss cannot leave the turn over the budget.
-  function forceTrim(messages, system, budget, cache) {
-    let changed = false;
-    let guard = 0;
-    while (messageTokens(messages, system, cache) > budget && guard++ < 40) {
-      if (dropLastImage(messages)) { changed = true; continue; }
-      const slots = textSlots(messages);
-      let longest = null;
-      let longestLen = 0;
-      for (const slot of slots) {
-        const t = slot.get();
-        if (t.length > longestLen) { longest = slot; longestLen = t.length; }
-      }
-      if (!longest || longestLen === 0) break;
-      const keep = Math.floor(longestLen / 2);
-      if (keep >= longestLen) break;
-      longest.set(longest.get().slice(0, keep));
-      changed = true;
-    }
-    return changed;
-  }
+  // Last resort is not used: a task that does not fit the cheaper tier is sent whole.
 
   function cleanup(messages) {
     for (const m of messages) {
@@ -400,30 +359,18 @@
     else m.content = ".";
   }
 
-  function clampBudget(opts) {
-    if (opts && Number.isFinite(opts.inputBudget)) {
-      return Math.min(INPUT_BUDGET, Math.max(0, opts.inputBudget));
-    }
-    return INPUT_BUDGET;
-  }
-
-  function fitTutorTurn(messages, system, opts) {
-    const inputBudget = clampBudget(opts);
+  function fitTutorTurn(messages, system) {
     const cache = new Map();
     const fitted = cloneMessages(messages);
     const before = messageTokens(fitted, system, cache);
     let changed = false;
-    const over = () => messageTokens(fitted, system, cache) > inputBudget;
-
-    while (over()) {
-      if (!dropLastImage(fitted)) break;
+    const over = () => messageTokens(fitted, system, cache) > CONTEXT_TARGET;
+    if (over() && shrinkKind(fitted, system, CONTEXT_TARGET, cache, "slide", true)) changed = true;
+    let guard = 0;
+    while (over() && guard++ < 20) {
+      if (!dropLastExtraRefImage(fitted)) break;
       changed = true;
     }
-    if (over() && shrinkKind(fitted, system, inputBudget, cache, "slide", true)) changed = true;
-    if (over() && shrinkKind(fitted, system, inputBudget, cache, "file", true)) changed = true;
-    if (over() && shrinkKind(fitted, system, inputBudget, cache, "schema", true)) changed = true;
-    if (over() && shrinkKind(fitted, system, inputBudget, cache, "question", false)) changed = true;
-    if (over() && forceTrim(fitted, system, inputBudget, cache)) changed = true;
     cleanup(fitted);
     ensureNonEmpty(fitted);
     const tokens = messageTokens(fitted, system, cache);
@@ -432,19 +379,15 @@
       tokens: tokens,
       before: before,
       trimmed: changed,
+      extended: tokens > CONTEXT_LIMIT,
       maxTokens: MAX_TOKENS,
-      inputBudget: inputBudget,
-      total: tokens + MAX_TOKENS,
     };
   }
 
   return {
     CONTEXT_LIMIT: CONTEXT_LIMIT,
-    HEADROOM: HEADROOM,
-    TOKEN_BUDGET: TOKEN_BUDGET,
+    CONTEXT_TARGET: CONTEXT_TARGET,
     MAX_TOKENS: MAX_TOKENS,
-    INPUT_BUDGET: INPUT_BUDGET,
-    SYSTEM_RESERVE: SYSTEM_RESERVE,
     textTokens: textTokens,
     imageTokens: imageTokens,
     imageTokensFromSize: imageTokensFromSize,

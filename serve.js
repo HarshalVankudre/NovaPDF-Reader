@@ -19,11 +19,8 @@ const {
   textTokens,
   imageTokens,
   CONTEXT_LIMIT,
-  HEADROOM,
-  TOKEN_BUDGET,
+  CONTEXT_TARGET,
   MAX_TOKENS,
-  INPUT_BUDGET,
-  SYSTEM_RESERVE,
 } = require("./assets/token-budget.js");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
@@ -288,9 +285,10 @@ function normalizeEffort(e) {
   return EFFORTS.has(e) ? e : REASONING_EFFORT;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// One question, one answer. fitTutorTurn (assets/token-budget.js) keeps
-// input_estimate + MAX_TOKENS <= TOKEN_BUDGET (80000), inside a hard 100000
-// ceiling. HEADROOM (20000) is never filled. Images go first, then slide text.
+// Haiku 5.5 is cheaper when the prompt stays under 100k tokens. fitTutorTurn
+// aims for 90k by dropping leftover slide checks only. A question, screenshot,
+// file, or schema that itself goes past 100k is sent whole. max_tokens is the
+// answer budget and is not part of that price tier.
 
 async function streamAnthropic(p, key, messages, write, signal, effort, onActivity) {
   let Anthropic;
@@ -425,10 +423,10 @@ const RETRY_DELAY_MS = 1500;
 async function streamWithFallback(payload, res, opts = {}) {
   const fittedTurn = fitTutorTurn(payload && payload.messages, CHAT_SYSTEM);
   const messages = fittedTurn.messages;
-  if (fittedTurn.trimmed) {
+  if (fittedTurn.trimmed || fittedTurn.extended) {
     console.log("POST /q  fit " + fittedTurn.before + " -> " + fittedTurn.tokens +
-      " input tokens; max_tokens " + MAX_TOKENS +
-      " (input+max " + fittedTurn.total + " <= " + TOKEN_BUDGET + ", ceiling " + CONTEXT_LIMIT + ", headroom " + HEADROOM + ")");
+      " input tokens (target " + CONTEXT_TARGET + ", cheaper tier " + CONTEXT_LIMIT +
+      (fittedTurn.extended ? ", extended" : "") + ")");
   }
   const effort = normalizeEffort(payload && payload.effort);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
@@ -800,11 +798,8 @@ module.exports = {
   textTokens,
   imageTokens,
   CONTEXT_LIMIT,
-  HEADROOM,
-  TOKEN_BUDGET,
+  CONTEXT_TARGET,
   MAX_TOKENS,
-  INPUT_BUDGET,
-  SYSTEM_RESERVE,
   CHAT_SYSTEM,
 };
 

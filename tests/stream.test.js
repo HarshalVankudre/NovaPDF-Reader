@@ -11,7 +11,21 @@ const path = require("path");
 process.env.SLIDEFINDER_CONFIG_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "db-slide-stream-"));
 const origLog = console.log;
 console.log = () => {};
-const { streamWithFallback, isTransientError, fitForPriceTier, CONTEXT_TARGET_TOKENS, PRICE_CLIFF_TOKENS } = require("../serve.js");
+const {
+  streamWithFallback,
+  isTransientError,
+  fitTutorTurn,
+  messageTokens,
+  textTokens,
+  imageTokens,
+  CHAT_SYSTEM,
+  CONTEXT_LIMIT,
+  HEADROOM,
+  TOKEN_BUDGET,
+  MAX_TOKENS,
+  INPUT_BUDGET,
+  SYSTEM_RESERVE,
+} = require("../serve.js");
 
 function fakePng(w, h) {
   const b = Buffer.alloc(24);
@@ -21,50 +35,155 @@ function fakePng(w, h) {
   b.writeUInt32BE(h, 20);
   return b.toString("base64");
 }
+function fakeJpeg(w, h) {
+  // SOI, a short APP0, then SOF0. Dimensions sit after the APP segment.
+  const app = Buffer.alloc(16);
+  app[0] = 0xff; app[1] = 0xe0; app.writeUInt16BE(14, 2);
+  const sof = Buffer.alloc(11);
+  sof[0] = 0xff; sof[1] = 0xc0; sof.writeUInt16BE(11, 2); sof[4] = 8;
+  sof.writeUInt16BE(h, 5); sof.writeUInt16BE(w, 7);
+  return Buffer.concat([Buffer.from([0xff, 0xd8]), app, sof, Buffer.from([0xff, 0xd9])]).toString("base64");
+}
+function underCeiling(fitted, label) {
+  assert.ok(fitted.tokens <= fitted.inputBudget, label + " input " + fitted.tokens + " > " + fitted.inputBudget);
+  assert.strictEqual(fitted.maxTokens, MAX_TOKENS);
+  assert.ok(fitted.tokens + fitted.maxTokens <= TOKEN_BUDGET, label + " total " + (fitted.tokens + fitted.maxTokens));
+  assert.ok(fitted.tokens + fitted.maxTokens <= CONTEXT_LIMIT - HEADROOM, label + " crossed the unused headroom");
+  assert.ok(fitted.total <= CONTEXT_LIMIT, label + " crossed 100k");
+}
+
+assert.strictEqual(CONTEXT_LIMIT, 100000);
+assert.strictEqual(HEADROOM, 20000);
+assert.strictEqual(TOKEN_BUDGET, 80000);
+assert.strictEqual(MAX_TOKENS, 32000);
+assert.strictEqual(INPUT_BUDGET, TOKEN_BUDGET - MAX_TOKENS);
+assert.strictEqual(textTokens(""), 0);
+assert.strictEqual(textTokens("abcd"), 1);
+assert.strictEqual(textTokens("abcde"), 2);
+assert.ok(textTokens(CHAT_SYSTEM) <= SYSTEM_RESERVE, "client reserve must cover the system prompt (" + textTokens(CHAT_SYSTEM) + ")");
+assert.ok(textTokens(CHAT_SYSTEM) + MAX_TOKENS <= TOKEN_BUDGET);
+assert.strictEqual(imageTokens({ type: "image", media_type: "image/png", data: fakePng(2200, 1650) }), Math.ceil(2200 * 1650 / 750));
+assert.strictEqual(imageTokens({ type: "image", media_type: "image/jpeg", data: fakeJpeg(30, 40) }), Math.ceil(30 * 40 / 750));
+{
+  const serveSrc = fs.readFileSync(path.join(__dirname, "..", "serve.js"), "utf8");
+  assert.match(serveSrc, /max_tokens: MAX_TOKENS/);
+  assert.doesNotMatch(serveSrc, /max_tokens:\s*64000/);
+}
 
 {
-  const small = fitForPriceTier([{ role: "user", content: "Was ist 3NF?" }], "system");
-  assert.strictEqual(small.trimmed, false, "a short question is sent as-is");
-  assert.strictEqual(small.extended, false);
-  assert.ok(small.tokens < CONTEXT_TARGET_TOKENS);
+  const text = "Was ist 3NF?\n\n### a.sql\nSELECT 1;\n\n[Folie 4 | VL | T]\ntext\n\nSchema (SQLite):\nkunde(id)";
+  const fitted = fitTutorTurn([{ role: "user", content: text }], "sys");
+  assert.strictEqual(fitted.trimmed, false, "a short question is sent as-is");
+  assert.strictEqual(fitted.messages[0].content, text, "section parse must round-trip");
+  underCeiling(fitted, "short");
 }
 {
   const slides = [];
-  for (let i = 1; i <= 12; i++) slides.push("[Folie " + i + " | VL | t]\n" + "x".repeat(40000));
-  const text = "Was ist 3NF?\n\n" + slides.join("\n\n") + "\n\nSchema (SQLite):\nkunde(id)";
-  const fitted = fitForPriceTier([{ role: "user", content: text }], "You write the course notes.");
-  assert.strictEqual(fitted.trimmed, true, "extra slide text is dropped to stay in the cheaper tier");
-  assert.ok(fitted.tokens <= CONTEXT_TARGET_TOKENS, "fitted prompt is under the 90k target, got " + fitted.tokens);
-  assert.ok(fitted.messages[0].content.indexOf("Was ist 3NF?") === 0, "the question stays");
-  assert.ok(/Schema \(SQLite\)/.test(fitted.messages[0].content), "the schema stays");
+  for (let i = 1; i <= 12; i++) slides.push("[Folie " + i + " | VL | t]\n" + "x".repeat(20000));
+  const schema = "Schema (SQLite):\nkunde(id)";
+  const text = "Was ist 3NF?\n\n" + slides.join("\n\n") + "\n\n" + schema;
+  const original = [{ role: "user", content: text }];
+  const snapshot = JSON.stringify(original);
+  const fitted = fitTutorTurn(original, "You write the course notes.");
+  assert.strictEqual(JSON.stringify(original), snapshot, "fitting must not mutate the caller's message");
+  assert.strictEqual(fitted.trimmed, true, "oversized slide text is shortened");
+  underCeiling(fitted, "slides");
+  assert.ok(fitted.messages[0].content.indexOf("Was ist 3NF?") === 0, "the question stays at the front");
+  assert.ok(fitted.messages[0].content.indexOf(schema) > 0, "the schema stays whole when it fits");
+  assert.ok(fitted.messages[0].content.indexOf("[Folie 1 |") >= 0, "early slide headers stay");
+  assert.ok(fitted.messages[0].content.length < text.length, "slide bodies were shortened");
 }
 {
-  const huge = fakePng(12000, 12000);
+  // Images are dropped before slide text is touched.
+  const slide = "[Folie 1 | VL | t]\nkeep-this-slide-body";
+  const blocks = [
+    { type: "text", text: "Q?\n\n" + slide },
+    { type: "image", media_type: "image/png", data: fakePng(8000, 8000) },
+  ];
+  const fitted = fitTutorTurn([{ role: "user", content: blocks }], "sys");
+  underCeiling(fitted, "image-before-slide");
+  assert.ok(!fitted.messages[0].content.some((b) => b.type === "image"), "the image that does not fit is dropped");
+  assert.ok(fitted.messages[0].content.some((b) => /keep-this-slide-body/.test(b.text)), "slide text is untouched once the image is gone");
+}
+{
   const blocks = [
     { type: "text", text: "Lies die Aufgabe im Bild." },
-    { type: "text", text: "Bild von Folie 10" },
-    { type: "image", media_type: "image/png", data: huge },
-    { type: "text", text: "Bild von Folie 11" },
-    { type: "image", media_type: "image/png", data: huge },
-    { type: "image", media_type: "image/png", data: huge },
+    { type: "text", text: "Screenshot 1" },
+    { type: "image", media_type: "image/png", data: fakePng(1000, 1000) },
+    { type: "text", text: "Screenshot 2" },
+    { type: "image", media_type: "image/png", data: fakePng(8000, 8000) },
   ];
-  const fitted = fitForPriceTier([{ role: "user", content: blocks }], "system");
+  const fitted = fitTutorTurn([{ role: "user", content: blocks }], "system");
   const imgs = fitted.messages[0].content.filter((b) => b.type === "image");
-  const labels = fitted.messages[0].content.filter((b) => b.type === "text" && /Bild von Folie/.test(b.text));
-  assert.strictEqual(fitted.trimmed, true, "an extra reference image is dropped");
-  assert.strictEqual(labels.length, 1, "the first slide check image is kept");
-  assert.strictEqual(imgs.length, 2, "the screenshot is kept along with one slide image");
-  assert.ok(/Lies die Aufgabe/.test(fitted.messages[0].content[0].text));
+  const labels = fitted.messages[0].content.filter((b) => b.type === "text" && /Screenshot/.test(b.text));
+  underCeiling(fitted, "drop-last-image");
+  assert.strictEqual(imgs.length, 1, "the last image is dropped first");
+  assert.strictEqual(labels.length, 1);
+  assert.strictEqual(labels[0].text, "Screenshot 1");
+  assert.strictEqual(fitted.messages[0].content[0].text, "Lies die Aufgabe im Bild.");
 }
 {
-  const only = fitForPriceTier([{
+  const only = fitTutorTurn([{
     role: "user",
-    content: [{ type: "image", media_type: "image/png", data: fakePng(12000, 12000) }],
+    content: [{ type: "image", media_type: "image/png", data: fakePng(9000, 9000) }],
   }], "system");
-  assert.strictEqual(only.trimmed, false, "a task that itself exceeds 100k is not cut");
-  assert.strictEqual(only.extended, true);
-  assert.ok(only.tokens > PRICE_CLIFF_TOKENS);
-  assert.strictEqual(only.messages[0].content.length, 1);
+  underCeiling(only, "huge-screenshot");
+  assert.ok(!only.messages[0].content.some((b) => b.type === "image"), "a screenshot that cannot fit is not sent");
+}
+{
+  const schema = "Schema (SQLite):\n" + "kunde(id int)\n".repeat(20);
+  const text = "Q\n\n### a.sql\n" + "x".repeat(300000) + "\n\n" + schema;
+  const fitted = fitTutorTurn([{ role: "user", content: text }], "sys");
+  underCeiling(fitted, "file");
+  assert.ok(fitted.messages[0].content.startsWith("Q"), "the question stays");
+  assert.ok(fitted.messages[0].content.indexOf(schema) > 0, "schema is kept by shortening the file first");
+  assert.ok(fitted.messages[0].content.indexOf("x".repeat(300000)) === -1, "the file body was shortened");
+}
+{
+  const q = "Z".repeat((INPUT_BUDGET + 5000) * 4);
+  const fitted = fitTutorTurn([{ role: "user", content: q }], "sys");
+  underCeiling(fitted, "question");
+  assert.ok(fitted.messages[0].content.startsWith("ZZZ"), "a question that itself exceeds the budget is shortened from the end");
+  assert.ok(fitted.messages[0].content.length < q.length);
+}
+{
+  // What the browser uploads for a normal screenshot ask still fits, and the
+  // server does not have to throw it away.
+  const blocks = [
+    { type: "text", text: "Was ist die dritte Normalform?\n\nSchema (SQLite):\nkunde(id, name)\nbestellung(id, kunde_id)" },
+    { type: "image", media_type: "image/png", data: fakePng(900, 160) },
+  ];
+  const client = fitTutorTurn([{ role: "user", content: blocks }], "", {
+    inputBudget: INPUT_BUDGET - SYSTEM_RESERVE,
+  });
+  assert.strictEqual(client.trimmed, false, "a normal screenshot ask is uploaded whole");
+  const server = fitTutorTurn(client.messages, CHAT_SYSTEM);
+  assert.strictEqual(server.trimmed, false, "the server keeps a normal screenshot ask");
+  underCeiling(server, "normal-screenshot");
+}
+{
+  const blocks = [{ type: "text", text: "Vergleiche die Diagramme.\n\nSchema (SQLite):\nkunde(id)" }];
+  for (let i = 1; i <= 4; i++) {
+    blocks.push({ type: "text", text: "Screenshot " + i });
+    blocks.push({ type: "image", media_type: "image/png", data: fakePng(2400, 1800) });
+  }
+  const client = fitTutorTurn([{ role: "user", content: blocks }], "", {
+    inputBudget: INPUT_BUDGET - SYSTEM_RESERVE,
+  });
+  assert.strictEqual(client.messages[0].content.filter((b) => b.type === "image").length, 4,
+    "four exam screenshots at paste size still fit");
+}
+{
+  const bogus = fitTutorTurn([{
+    role: "user",
+    content: [
+      { type: "text", text: "Aufgabe" },
+      { type: "image", media_type: "image/png", data: "AAAA" },
+    ],
+  }], "system");
+  underCeiling(bogus, "unreadable-image");
+  assert.ok(!bogus.messages[0].content.some((b) => b.type === "image"), "an unreadable image is dropped rather than under-billed");
+  assert.strictEqual(bogus.messages[0].content[0].text, "Aufgabe");
 }
 
 const PAYLOAD = { provider: "opus", messages: [{ role: "user", content: "Was ist 3NF?" }] };
@@ -77,6 +196,25 @@ function fakeRes() {
 const err = (status, name) => Object.assign(new Error("boom " + status), { status, name });
 
 (async () => {
+  // the server fits before any provider runs, including the retry path
+  {
+    const huge = "y".repeat(400000);
+    const schema = "Schema (SQLite):\nkunde(id)";
+    let seen = "";
+    await streamWithFallback({
+      provider: "opus",
+      messages: [{ role: "user", content: "Frage?\n\n[Folie 1 | v | t]\n" + huge + "\n\n" + schema }],
+    }, fakeRes(), Object.assign({}, BASE, {
+      stream: async (p, key, messages) => { seen = messages[0].content; },
+    }));
+    assert.ok(seen.startsWith("Frage?"), "the streamed turn keeps the question");
+    assert.ok(seen.indexOf(schema) > 0, "the streamed turn keeps the schema");
+    assert.ok(seen.length < huge.length, "slide text is shortened before the provider sees it");
+    const fitted = { tokens: messageTokens([{ role: "user", content: seen }], CHAT_SYSTEM), maxTokens: MAX_TOKENS, inputBudget: INPUT_BUDGET, total: 0 };
+    fitted.total = fitted.tokens + fitted.maxTokens;
+    underCeiling(fitted, "stream");
+  }
+
   // transient classification
   assert.ok(isTransientError(err(529)), "529 overloaded is transient");
   assert.ok(isTransientError(err(429)), "429 is transient");

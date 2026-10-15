@@ -13,6 +13,18 @@ const {
   buildOpenAIRequestBody,
 } = require("./llm-config");
 const SqlUtil = require("./assets/sql-util.js");
+const {
+  fitTutorTurn,
+  messageTokens,
+  textTokens,
+  imageTokens,
+  CONTEXT_LIMIT,
+  HEADROOM,
+  TOKEN_BUDGET,
+  MAX_TOKENS,
+  INPUT_BUDGET,
+  SYSTEM_RESERVE,
+} = require("./assets/token-budget.js");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -209,7 +221,7 @@ async function askLLM(question, candidates) {
     const e = new Error("No API key for " + p.label + ". Set " + p.envHint + " (environment variable) or add it to serve.config.json, then restart the server.");
     e.status = 400; throw e;
   }
-  const fitted = fitForPriceTier([{ role: "user", content: buildUserPrompt(question, candidates) }], CHAT_SYSTEM);
+  const fitted = fitTutorTurn([{ role: "user", content: buildUserPrompt(question, candidates) }], CHAT_SYSTEM);
   const user = fitted.messages[0].content;
   const t0 = Date.now();
   const out = p.kind === "anthropic" ? await askAnthropic(p, key, CHAT_SYSTEM, user) : await askOpenAICompatible(p, key, CHAT_SYSTEM, user);
@@ -276,136 +288,19 @@ function normalizeEffort(e) {
   return EFFORTS.has(e) ? e : REASONING_EFFORT;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// Haiku 5.5 prices a prompt at the low rate up to 100k tokens and about 5× above that.
-// One question is one turn, so we AIM to stay under the cliff — with spare room so the
-// instruction is not crowded out — but a task that itself does not fit is sent whole.
-const PRICE_CLIFF_TOKENS = 100000;
-const CONTEXT_TARGET_TOKENS = 90000;
-function textTokens(s) { return Math.ceil(String(s || "").length / 3); }
-function b64Prefix(b64, maxBytes) {
-  const clean = String(b64 || "").replace(/\s/g, "");
-  const chars = Math.min(clean.length, Math.ceil(maxBytes * 4 / 3) + 4);
-  return Buffer.from(clean.slice(0, chars), "base64").subarray(0, maxBytes);
-}
-function imagePixelSize(mediaType, b64) {
-  const bytes = b64Prefix(b64, 65536);
-  const mt = String(mediaType || "").toLowerCase();
-  if (mt.indexOf("png") >= 0 || (bytes[0] === 0x89 && bytes[1] === 0x50)) {
-    if (bytes.length < 24) return null;
-    return { w: bytes.readUInt32BE(16), h: bytes.readUInt32BE(20) };
-  }
-  let i = 2;
-  while (i + 8 < bytes.length) {
-    if (bytes[i] !== 0xff) { i++; continue; }
-    const marker = bytes[i + 1];
-    if (marker === 0xc0 || marker === 0xc1 || marker === 0xc2) {
-      return { h: bytes.readUInt16BE(i + 5), w: bytes.readUInt16BE(i + 7) };
-    }
-    const len = bytes.readUInt16BE(i + 2);
-    if (!len || len < 2) break;
-    i += 2 + len;
-  }
-  return null;
-}
-// Anthropic image tokens are about width×height/750. Unknown images estimate high
-// so reference slides are trimmed before we risk the expensive tier.
-function imageTokens(block) {
-  const dim = imagePixelSize(block && block.media_type, block && block.data);
-  if (!dim || !dim.w || !dim.h) return 12000;
-  return Math.ceil((dim.w * dim.h) / 750);
-}
-function blockTokens(block) {
-  if (!block) return 0;
-  if (typeof block === "string") return textTokens(block);
-  if (block.type === "image") return imageTokens(block);
-  return textTokens(block.text || "");
-}
-function messageTokens(messages, system) {
-  let n = textTokens(system);
-  for (const m of messages || []) {
-    const c = m && m.content;
-    if (typeof c === "string" || !Array.isArray(c)) n += textTokens(c);
-    else for (const b of c) n += blockTokens(b);
-  }
-  return n;
-}
-function isRefLabel(text) { return /^Bild von Folie \d+\s*$/.test(String(text || "").trim()); }
-function cloneForFit(messages) {
-  return (messages || []).map((m) => {
-    if (!m || !Array.isArray(m.content)) return Object.assign({}, m);
-    return Object.assign({}, m, { content: m.content.map((b) => Object.assign({}, b)) });
-  });
-}
-function contentArrays(messages) {
-  const out = [];
-  for (const m of messages || []) if (m && Array.isArray(m.content)) out.push(m.content);
-  return out;
-}
-function dropLastSlideExcerpt(messages) {
-  const arrays = contentArrays(messages);
-  for (let a = arrays.length - 1; a >= 0; a--) {
-    for (let i = arrays[a].length - 1; i >= 0; i--) {
-      const b = arrays[a][i];
-      if (!b || b.type === "image" || typeof b.text !== "string") continue;
-      const parts = b.text.split(/\n\n/);
-      for (let p = parts.length - 1; p >= 0; p--) {
-        if (!/^\[Folie \d+/.test(parts[p].trim())) continue;
-        parts.splice(p, 1);
-        b.text = parts.filter((x) => x.trim()).join("\n\n");
-        if (!b.text.trim()) arrays[a].splice(i, 1);
-        return true;
-      }
-    }
-  }
-  for (const m of messages || []) {
-    if (!m || Array.isArray(m.content) || typeof m.content !== "string") continue;
-    const parts = m.content.split(/\n\n/);
-    for (let p = parts.length - 1; p >= 0; p--) {
-      if (!/^\[Folie \d+/.test(parts[p].trim())) continue;
-      parts.splice(p, 1);
-      m.content = parts.filter((x) => x.trim()).join("\n\n");
-      return true;
-    }
-  }
-  return false;
-}
-function dropLastExtraRefImage(messages) {
-  for (const content of contentArrays(messages)) {
-    const refs = [];
-    for (let i = 1; i < content.length; i++) {
-      if (content[i] && content[i].type === "image" && isRefLabel(content[i - 1] && content[i - 1].text)) refs.push(i);
-    }
-    if (refs.length < 2) continue; // keep the one check image, and a lone snip
-    const i = refs[refs.length - 1];
-    content.splice(i - 1, 2);
-    return true;
-  }
-  return false;
-}
-// Prefer the cheaper tier. Drop optional slide checks only. The question,
-// screenshots, files, and schema stay even when that extends past 100k.
-function fitForPriceTier(messages, system) {
-  const fitted = cloneForFit(messages);
-  const before = messageTokens(messages, system);
-  let trimmed = false;
-  while (messageTokens(fitted, system) > CONTEXT_TARGET_TOKENS) {
-    if (dropLastSlideExcerpt(fitted)) { trimmed = true; continue; }
-    if (dropLastExtraRefImage(fitted)) { trimmed = true; continue; }
-    break;
-  }
-  const tokens = messageTokens(fitted, system);
-  return { messages: fitted, tokens: tokens, before: before, trimmed: trimmed, extended: tokens > PRICE_CLIFF_TOKENS };
-}
+// One question, one answer. fitTutorTurn (assets/token-budget.js) keeps
+// input_estimate + MAX_TOKENS <= TOKEN_BUDGET (80000), inside a hard 100000
+// ceiling. HEADROOM (20000) is never filled. Images go first, then slide text.
 
 async function streamAnthropic(p, key, messages, write, signal, effort, onActivity) {
   let Anthropic;
   try { Anthropic = require("@anthropic-ai/sdk"); }
   catch (e) { throw Object.assign(new Error("Anthropic SDK missing - npm install @anthropic-ai/sdk"), { status: 500 }); }
   const client = new Anthropic({ apiKey: key });
-  const fitted = fitForPriceTier(messages, CHAT_SYSTEM);
-  if (fitted.trimmed) console.log("context ~" + fitted.tokens + " tokens after dropping extra slide checks (target " + CONTEXT_TARGET_TOKENS + ", was " + fitted.before + ")");
-  else if (fitted.extended) console.log("context ~" + fitted.tokens + " tokens extends past the 100k cheaper tier; the task itself did not fit");
+  // streamWithFallback already fitted the turn. Fit again at the API call so a
+  // direct caller still cannot cross the ceiling. max_tokens is the reserved
+  // answer+thinking budget; thinking counts toward it.
+  const fitted = fitTutorTurn(messages, CHAT_SYSTEM);
   messages = fitted.messages;
   // NOTE: do not add temperature/top_p/top_k — Fable 5 (and Opus 4.8) reject
   // non-default sampling params with a 400. Precision is steered via
@@ -413,7 +308,7 @@ async function streamAnthropic(p, key, messages, write, signal, effort, onActivi
   // (on Fable 5 thinking is always on anyway; never send {type:"disabled"}).
   const params = {
     model: p.model,
-    max_tokens: 64000,                              // thinking counts toward max_tokens; headroom so long multi-part answers at high effort aren't cut off
+    max_tokens: MAX_TOKENS,
     // "adaptive" is explicit on purpose — an Opus model via the models.opus
     // override would otherwise run without thinking. "summarized" makes the
     // stream carry thinking progress, which the stall detector uses as a
@@ -528,7 +423,13 @@ const RETRY_DELAY_MS = 1500;
 // opts.signal aborts the upstream request when the browser disconnects, so a
 // closed tab or a :stop doesn't keep a paid generation running.
 async function streamWithFallback(payload, res, opts = {}) {
-  const messages = payload.messages;
+  const fittedTurn = fitTutorTurn(payload && payload.messages, CHAT_SYSTEM);
+  const messages = fittedTurn.messages;
+  if (fittedTurn.trimmed) {
+    console.log("POST /q  fit " + fittedTurn.before + " -> " + fittedTurn.tokens +
+      " input tokens; max_tokens " + MAX_TOKENS +
+      " (input+max " + fittedTurn.total + " <= " + TOKEN_BUDGET + ", ceiling " + CONTEXT_LIMIT + ", headroom " + HEADROOM + ")");
+  }
   const effort = normalizeEffort(payload && payload.effort);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
   const clientSignal = opts.signal || null;
@@ -890,7 +791,22 @@ function handleRequest(req, res) {
 // The same handler runs in two modes: `node serve.js` starts the local HTTP
 // server below; on Vercel, api/index.js imports handleRequest and runs it as
 // a serverless function (no listen()).
-module.exports = { handleRequest, streamWithFallback, isTransientError, fitForPriceTier, messageTokens, PRICE_CLIFF_TOKENS, CONTEXT_TARGET_TOKENS };
+module.exports = {
+  handleRequest,
+  streamWithFallback,
+  isTransientError,
+  fitTutorTurn,
+  messageTokens,
+  textTokens,
+  imageTokens,
+  CONTEXT_LIMIT,
+  HEADROOM,
+  TOKEN_BUDGET,
+  MAX_TOKENS,
+  INPUT_BUDGET,
+  SYSTEM_RESERVE,
+  CHAT_SYSTEM,
+};
 
 if (require.main === module) {
   const server = http.createServer(handleRequest);

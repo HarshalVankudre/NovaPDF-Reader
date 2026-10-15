@@ -800,6 +800,14 @@
   // received yet (exam-day resilience: a flaky first connection self-heals).
   // A 4xx (e.g. missing API key) or a deliberate abort is final — no retry.
   async function postQ(messages, effort, signal) {
+    // Same fit the server applies, so a huge screenshot or file is not uploaded
+    // only to be thrown away. SYSTEM_RESERVE stands in for the system prompt,
+    // which lives only on the server. The server fit is the guarantee.
+    if (typeof TokenBudget !== "undefined" && TokenBudget.fitTutorTurn) {
+      messages = TokenBudget.fitTutorTurn(messages, "", {
+        inputBudget: TokenBudget.INPUT_BUDGET - TokenBudget.SYSTEM_RESERVE,
+      }).messages;
+    }
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {

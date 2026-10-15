@@ -74,6 +74,9 @@ assert.match(app, /function panicHide\(/, "Esc should close the notes and restor
 assert.doesNotMatch(app, /classList\.add\("viewer-only"\)/, "Esc must not hide the search sidebar");
 // resilience + rapid-fire flow
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");
+assert.match(app, /TokenBudget\.fitTutorTurn\(/, "the client trims a turn before upload");
+assert.ok(html.indexOf("assets/token-budget.js") > 0 && html.indexOf("assets/token-budget.js") < html.indexOf("assets/app.js"),
+  "the token budget loads before the UI controller");
 assert.match(app, /askQueue\.shift\(\)/, "questions pasted while streaming should queue and fire automatically");
 assert.match(app, /function stopAsk\(/, ":stop should abort the streaming answer");
 assert.match(app, /signal: signal,/, "tutor requests should be abortable");

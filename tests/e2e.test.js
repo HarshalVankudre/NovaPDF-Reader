@@ -107,7 +107,7 @@ const mock = http.createServer((req, res) => {
     call.cite = cite; call.bogus = bogus;
     await think(10, 450);                              // ~4.5 s of thinking -> counter must show
     await answer("**3NF:** Relation ist in 2NF und kein Nichtschlüsselattribut hängt transitiv vom Schlüssel ab.\n\n" +
-      "Anzahl Kunden:\n```sql\nSELECT COUNT(*) AS anzahl FROM kunde;\n```\n\n(Folie " + cite + ", " + bogus + ")");
+      "Anzahl Kunden:\n```sql\nSELECT COUNT(*) AS anzahl FROM kunde;\n```");
   });
 });
 
@@ -228,17 +228,14 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
         `${b.model} effort=${b.output_config.effort} thinking=${JSON.stringify(b.thinking)} max_tokens=${b.max_tokens}`);
       check("request: refusal fallback to Opus 4.8 via beta header",
         JSON.stringify(b.fallbacks) === '[{"model":"claude-opus-4-8"}]' && /server-side-fallback-2026-06-01/.test(call.headers["anthropic-beta"] || ""));
-      check("request: system prompt is the notes prompt (stealth rule present)", /course notes \("Notizen"\)/.test(b.system) && /never mention being an AI/.test(b.system));
-      check("request: top BM25 slides sent as text", providedPages(call.text).length === 12, providedPages(call.text).length + " slides");
-      check("request: top slides attached as rendered images (vision)", imgs.length >= 3 && imgs.every((x) => x.source.media_type === "image/jpeg" && x.source.data.length > 50000),
-        imgs.length + " images, " + imgs.map((x) => Math.round(x.source.data.length / 1024) + "KB").join("/"));
-      check("request: imported DB schema + dialect included", /Importiertes Datenbank-Schema \(Dialekt: SQLite/.test(call.text) && /kunde/.test(call.text) && /bestellung/.test(call.text));
+      check("request: system prompt is the exam-answer prompt", /course notes \("Notizen"\)/.test(b.system) && /never mention being an AI/i.test(b.system) && /database exam/.test(b.system));
+      check("request: the question and schema, no slide text or slide images",
+        !/\[Folie \d+/.test(call.text) && /Was ist die dritte Normalform/.test(call.text) && /Schema \(SQLite\)/.test(call.text) && /kunde/.test(call.text) && imgs.length === 0,
+        imgs.length + " images");
       check("answer streams into the Notizen pane (markdown rendered)", /3NF:/.test(ans) && (await page.$(".nt-a strong")) !== null);
-      check("citation check keeps the provided slide and strips the unprovided one",
-        refs.includes(call.cite) && !refs.includes(call.bogus), "links: " + refs.join(",") + " (cited " + call.cite + " + bogus " + call.bogus + ")");
     } else {
       check("live answer arrives without an error", ans.length > 40 && !/Fehler|abgelehnt/.test(ans), JSON.stringify(ans.slice(0, 160)));
-      check("live answer cites real slides (or marks itself allg.)", refs.every((p) => p >= 1 && p <= 317) && (refs.length > 0 || /allg\./.test(ans)), "links: " + (refs.join(",") || "none"));
+      check("live answer cites only real slides, and only when a slide confirms it", refs.every((p) => p >= 1 && p <= 317), "links: " + (refs.join(",") || "none"));
     }
     const sqlRes = await waitFor(() => page.$eval(".nt-sql-result", (e) => e.innerText).catch(() => null), LIVE ? 20000 : 10000, "inline sql result").catch(() => "");
     check("read-only SQL in the answer auto-runs against the snapshot (3 Kunden)", /\b3\b/.test(sqlRes) && !/Fehler|error/i.test(sqlRes), sqlRes.replace(/\s+/g, " "));

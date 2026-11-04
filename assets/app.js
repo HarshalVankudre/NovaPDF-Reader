@@ -8,11 +8,8 @@
   "use strict";
 
   const DATA_URL = "data/slides.json";
-  const AI_PROVIDER = "opus";              // provider id (historical name) — the model behind it is Claude Fable 5 (text + high-res vision)
-  const VISION_SLIDES = 3; // top slides attached as images for vision grounding
-  const VISION_MAX = 4;    // cap incl. extra diagram-heavy slides pulled from ranks 4-6
-  const VISION_WIDTH = 2200; // vision render width — within Fable 5's 2576px high-res limit, so no API-side downscale
-  const THIN_TEXT = 180;   // slides with less extracted text than this are likely pure diagrams (content lives in the image)
+  const AI_PROVIDER = "opus";              // provider id (historical name) — the model behind it is Claude Fable 5 (text + screenshots)
+  const VISION_WIDTH = 2200; // snip render width — a dragged region is sent as the question image
 
   const $ = (id) => document.getElementById(id);
   const qInput = $("q");
@@ -222,24 +219,6 @@
   }
 
   const fold = (w) => (typeof SlideSearchEngine.fold === "function" ? SlideSearchEngine.fold(w) : w.toLowerCase());
-
-  // Render a slide to a JPEG data payload for the vision model. Rendered fresh at
-  // a higher resolution than the thumbnail so diagrams/ER-models/SQL stay legible.
-  // Fable 5 accepts up to 2576px on the long edge without server-side downscaling,
-  // so everything rendered at VISION_WIDTH reaches the model pixel-for-pixel.
-  async function renderSlideForVision(globalPage, width) {
-    const L = pageToLecture[globalPage];
-    const doc = await getLectureDoc(L);
-    const page = await doc.getPage(globalPage - L.startPage + 1);
-    const base = page.getViewport({ scale: 1 });
-    const scale = (width || VISION_WIDTH) / base.width;
-    const vp = page.getViewport({ scale });
-    const c = document.createElement("canvas");
-    c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
-    await page.render({ canvasContext: c.getContext("2d"), viewport: vp }).promise;
-    const url = c.toDataURL("image/jpeg", 0.85);
-    return { media_type: "image/jpeg", data: url.split(",")[1] };
-  }
 
   // Per-word highlight geometry in NORMALIZED page coords (0..1), computed once
   // per slide from the pdf.js text layer at scale 1. Because each box is a
@@ -821,6 +800,11 @@
   // received yet (exam-day resilience: a flaky first connection self-heals).
   // A 4xx (e.g. missing API key) or a deliberate abort is final — no retry.
   async function postQ(messages, effort, signal) {
+    // Prefer the cheaper Haiku tier. Only leftover slide checks are trimmed.
+    // The question, screenshots, and files are uploaded even if they go past 100k.
+    if (typeof TokenBudget !== "undefined" && TokenBudget.fitTutorTurn) {
+      messages = TokenBudget.fitTutorTurn(messages, "").messages;
+    }
     let lastErr = null;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
@@ -997,7 +981,6 @@
       return;
     }
     setAiBusy(true);
-    const isImageAsk = imgs.length > 0;              // pasted screenshot → the image IS the full question
     let assistantTurn = null;
     const ctrl = askCtrl = new AbortController();
     let acc = "";
@@ -1006,119 +989,32 @@
       // The only model is Claude Fable 5 (multimodal: text + screenshots).
       const provider = AI_PROVIDER;
 
-      // BM25 slide text is for TEXT questions only.
-      // A pasted screenshot is self-contained, so we send just the image — no slides.
-      let citationSlides = [];
-      let slidesText = "";
-      let visionImages = [];     // rendered top-slide images {page, media_type, data} (vision grounding)
-      if (q && !isImageAsk) {
-        const res = engine.search(q, { limit: 12 });
-        const pickedSlides = res.results.slice(0, 12);
-        citationSlides = pickedSlides.map((r) => data.slides[r.docId]).filter(Boolean);
-        // Which slides go along as IMAGES: the top-ranked ones, plus any near-top
-        // slide whose extracted text is so thin its content must live in the
-        // graphics (ER diagram, table screenshot). :fast turns images off.
-        // PASTED exam tasks (long q) are self-contained — slide images only pay
-        // off when the slides genuinely match, so weak matches skip the whole
-        // render+upload+vision cost (several seconds) and strong matches send
-        // just the single best slide as grounding.
-        let visionPages = [];
-        if (!fastMode && typeof pdfjsLib !== "undefined") {
-          const top = res.results[0];
-          const pastedTask = q.length >= 160;
-          if (pastedTask) {
-            if (top && (top.coverage || 0) >= 0.5) visionPages = [top.page];
-          } else {
-            visionPages = pickedSlides.slice(0, VISION_SLIDES).map((r) => r.page);
-            for (const r of pickedSlides.slice(VISION_SLIDES, 6)) {
-              if (visionPages.length >= VISION_MAX) break;
-              const t = ((((data.slides[r.docId] || {}).text) || "")).replace(/\s+/g, " ").trim();
-              if (t.length < THIN_TEXT) visionPages.push(r.page);
-            }
-          }
-        }
-        slidesText = pickedSlides.map((r) =>
-          "[Folie " + r.page + " | " + (r.lecture || "") + " | " + (r.title || "") +
-          (visionPages.indexOf(r.page) >= 0 ? " | auch als Bild beigefügt" : "") + "]\n" +
-          (((data.slides[r.docId] || {}).text) || "").slice(0, 1000)
-        ).join("\n\n");
-        visionImages = (await Promise.all(visionPages.map((pg) =>
-          renderSlideForVision(pg, VISION_WIDTH)
-            .then((im) => ({ page: pg, media_type: im.media_type, data: im.data }))
-            .catch(() => null)
-        ))).filter(Boolean);
-      }
-
-      // attached .sql/text files → a context block appended to the prompt
-      let filesText = "";
-      if (files.length) {
-        filesText = "\n\n--- Angehängte Datei(en) (vom Nutzer eingefügt) ---\n" +
-          files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n");
-      }
-
-      // imported DB schema + active dialect — sent with EVERY ask (screenshots too:
-      // a photographed SQL task still needs the real table/column names to be solvable)
-      let schemaBlock = "";
+      // The question, pasted screenshots, and attached files are the whole task.
+      // Slides stay on screen as the cover; they are not sent with the question.
+      let pictures = imgs;
+      let schemaText = "";
+      let dialect = "";
       try {
         if (window.SqlSandbox && SqlSandbox.schemaText) {
-          const schema = await SqlSandbox.schemaText();
-          if (schema) {
-            const dialect = (SqlSandbox.engineName && SqlSandbox.engineName()) || "SQL";
-            schemaBlock = "\n\n--- Importiertes Datenbank-Schema (Dialekt: " + dialect +
-              " — nutze GENAU diese Tabellen-/Spaltennamen) ---\n" + schema;
-          }
+          schemaText = await SqlSandbox.schemaText() || "";
+          if (schemaText) dialect = (SqlSandbox.engineName && SqlSandbox.engineName()) || "SQL";
         }
       } catch (e) {}
 
-      // text block: for an image ask, request a clean STRUCTURED solution of what's in the picture
-      let textPart;
-      const snipPages = Array.from(new Set(imgs.map((im) => im.page).filter(Boolean)));
-      if (isImageAsk && snipPages.length && imgs.every((im) => im.page)) {
-        // every image is a region snipped from a slide (Alt+drag) → ground the
-        // answer in the source slide's text AND pixels, and allow its citation
-        citationSlides = snipPages.map((p) => slideByPage(p)).filter(Boolean);
-        const ctx = citationSlides.map((s) =>
-          "[Folie " + s.page + " | " + (s.lecture || "") + " | " + (s.title || "") + "]\n" +
-          String(s.text || "").slice(0, 1000)).join("\n\n");
-        textPart = (q ? q + "\n\n" : "Erkläre präzise und so knapp wie möglich, was der markierte Ausschnitt zeigt und bedeutet.\n\n") +
-          "Der Ausschnitt stammt von Folie " + snipPages.join(", ") + "." +
-          (ctx ? "\n\n--- Text der Quell-Folie(n) (Kontext) ---\n" + ctx : "") +
-          filesText + schemaBlock +
-          "\n\nSchließe mit \"(Folie " + snipPages.join(", Folie ") + ")\".";
-      } else if (isImageAsk) {
-        textPart = (q ? q + "\n\n" : "") +
-          "Im Bild steht die gesamte Aufgabe. Lies sie vollständig (auch Tabellen und Diagramme) und gib NUR die Lösung — " +
-          "direkt, alle Teilaufgaben, so knapp wie möglich zum schnellen Ablesen. " +
-          "Wähle selbst das übersichtlichste Format passend zur Aufgabe (Markdown wird angezeigt: Stichpunkte, nummerierte Zeilen, Tabellen, ```sql-Blöcke …). " +
-          "Kein Erklärtext (außer die Aufgabe verlangt ihn), kein Wiederholen der Aufgabe, keine Folien-Zitate." +
-          filesText + schemaBlock;
-      } else {
-        // with a file but no typed question, ask the model to solve/explain it
-        const ask = q || (files.length
-          ? "Beantworte die Aufgabe aus der/den angehängten Datei(en). Enthält sie keine Frage, erkläre kurz und präzise, was der SQL-Code tut."
-          : "");
-        textPart = ask + filesText +
-          (slidesText ? "\n\n--- Relevante Folien (Kontext) ---\n" + slidesText : "") +
-          schemaBlock +
-          (visionImages.length ? "\n\n(Die wichtigsten Folien folgen als Bilder, jeweils mit ihrer Foliennummer beschriftet — nutze sie für Diagramme, ER-Modelle und Tabellen.)" : "");
+      const chunks = [];
+      if (q) chunks.push(q);
+      if (files.length) {
+        chunks.push(files.map((f) => "### " + f.name + (f.truncated ? " (gekürzt)" : "") + "\n" + f.text).join("\n\n"));
       }
+      if (schemaText) chunks.push("Schema (" + dialect + "):\n" + schemaText);
+      const textPart = chunks.join("\n\n");
 
-      // neutral content blocks: text, then images — each image preceded by a short
-      // label so the model knows which Folie (or screenshot) it is looking at and
-      // its citations stay precise
-      const blocks = [{ type: "text", text: textPart }];
-      if (isImageAsk) {
-        imgs.forEach((im, i) => {
-          if (im.page) blocks.push({ type: "text", text: "Ausschnitt von Folie " + im.page + ":" });
-          else if (imgs.length > 1) blocks.push({ type: "text", text: "Screenshot " + (i + 1) + ":" });
-          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-        });
-      } else {
-        for (const im of visionImages) {
-          blocks.push({ type: "text", text: "Bild von Folie " + im.page + ":" });
-          blocks.push({ type: "image", media_type: im.media_type, data: im.data });
-        }
-      }
+      const blocks = [];
+      if (textPart) blocks.push({ type: "text", text: textPart });
+      pictures.forEach((im, i) => {
+        if (pictures.length > 1) blocks.push({ type: "text", text: "Screenshot " + (i + 1) });
+        blocks.push({ type: "image", media_type: im.media_type, data: im.data });
+      });
 
       // ONE-SHOT mode: there is no conversation. Every question stands alone —
       // no prior Q/A pairs are sent to the model, and asking wipes the previous
@@ -1178,8 +1074,9 @@
         if (typeof SlideSearchEngine !== "undefined" && typeof SlideSearchEngine.verifyCitations === "function") {
           // pages sent as images are trusted: the model may have read content there
           // that text extraction missed (diagrams), so don't strip those citations
-          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, citationSlides, {
-            trustedPages: visionImages.map((im) => im.page).concat(imgs.map((im) => im.page).filter(Boolean)),
+          const cited = imgs.map((im) => im.page && slideByPage(im.page)).filter(Boolean);
+          assistantTurn.content = SlideSearchEngine.verifyCitations(assistantTurn.content, cited, {
+            trustedPages: cited.map((s) => s.page),
           });
         }
       } catch (e) {}
@@ -1522,7 +1419,7 @@
   function setFastMode(on) {
     fastMode = !!on;
     try { localStorage.setItem("aiFast", fastMode ? "1" : "0"); } catch (e) {}
-    showAiToast(fastMode ? "schnell · nur Text" : "Folienbilder an (Vision)");
+    showAiToast(fastMode ? "schnell" : "normal");
   }
   function toggleAiBar() {
     aiBar.hidden = !aiBar.hidden;
@@ -1616,8 +1513,7 @@
     document.addEventListener("sqlfix", (e) => {
       const d = (e && e.detail) || {};
       if (!d.sql || aiStreaming) return;
-      qInput.value = "Diese SQL schlägt auf der importierten Datenbank fehl — korrigiere sie. Gib NUR die korrigierte, lauffähige Abfrage.\n```sql\n" +
-        d.sql + "\n```\nFehlermeldung: " + (d.error || "");
+      qInput.value = "```sql\n" + d.sql + "\n```\n" + (d.error || "");
       runAsk();
     });
     let resizeTimer = null;

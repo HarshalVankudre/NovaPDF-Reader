@@ -11,15 +11,11 @@ assert.doesNotMatch(html, /id="aiProvider"/, "the provider selector should be go
 assert.match(app, /const AI_PROVIDER = "opus";/, "Opus is the only model");
 assert.doesNotMatch(app, /PROVIDER_ALIASES/, "provider aliases should be removed");
 assert.doesNotMatch(app, /aiProviderSel/, "the provider selector wiring should be removed");
-// every ask sends the one model
+// every ask sends the one model. The question, pasted screenshots, and files are the task.
 assert.match(app, /const provider = AI_PROVIDER;/);
-// vision grounding: typed questions attach rendered top-slide images unless :fast is on
-assert.match(app, /const VISION_SLIDES = 3;/);
-assert.match(app, /const VISION_MAX = 4;/, "diagram-heavy near-top slides may add a 4th vision image");
-assert.match(app, /renderSlideForVision\(/);
 assert.match(app, /let fastMode = false;/);
-// each slide image is labeled with its page so the model's citations stay precise
-assert.match(app, /"Bild von Folie " \+ im\.page/, "vision images should be labeled with their Folie number");
+assert.doesNotMatch(app, /const VISION_SLIDES/, "typed questions must not attach lecture slides");
+assert.doesNotMatch(app, /auch als Bild beigefügt/, "slide excerpts must not be sent with the question");
 // generated ```sql blocks are syntax-colored via a tokenize→escape→wrap pass
 assert.match(app, /function highlightSql\(/, "SQL code blocks in answers should be syntax-colored");
 // ONE-SHOT: every ask sends exactly one user turn — no conversational memory,
@@ -70,14 +66,17 @@ assert.match(app, /async function crossCheckAnswer\(/, "answers should be cross-
 assert.match(app, /function normalizeVerdictText\(/, "identical results should confirm without an extra call");
 assert.match(app, /"GLEICH"/, "the compare verdict protocol should exist");
 assert.match(app, /Schiedsprüfung/, "conflicts should be settled by an arbiter solve");
+assert.doesNotMatch(app, /Im Bild steht die gesamte Aufgabe/, "image asks must not carry a second instruction");
 assert.match(app, /async function sqlEvidenceFor\(/, "SQL answers should be checked against real execution evidence");
 assert.match(sandbox, /async function execForCheck\(/, "the sandbox should expose the silent evidence executor");
 // Esc closes only the notes and restores the normal UI — never hides the sidebar
 assert.match(app, /function panicHide\(/, "Esc should close the notes and restore the normal UI");
 assert.doesNotMatch(app, /classList\.add\("viewer-only"\)/, "Esc must not hide the search sidebar");
-assert.match(app, /const pastedTask = q\.length >= 160;/, "pasted tasks should skip weak slide-image overhead");
 // resilience + rapid-fire flow
 assert.match(app, /async function postQ\(/, "tutor requests should retry once before failing");
+assert.match(app, /TokenBudget\.fitTutorTurn\(/, "the client trims a turn before upload");
+assert.ok(html.indexOf("assets/token-budget.js") > 0 && html.indexOf("assets/token-budget.js") < html.indexOf("assets/app.js"),
+  "the token budget loads before the UI controller");
 assert.match(app, /askQueue\.shift\(\)/, "questions pasted while streaming should queue and fire automatically");
 assert.match(app, /function stopAsk\(/, ":stop should abort the streaming answer");
 assert.match(app, /signal: signal,/, "tutor requests should be abortable");
@@ -86,6 +85,8 @@ assert.match(app, /assistantTurn\.content = acc \? acc \+ /, "a failed/aborted s
 assert.match(app, /postQ\(\[\{ role: "user", content: adjBlocks \}\], "xhigh"\)/,
   "the arbiter should run at maximum reasoning depth");
 const serve = fs.readFileSync(path.join(ROOT, "serve.js"), "utf8");
+assert.doesNotMatch(serve, /const SYSTEM_PROMPT/, "there is one system prompt");
+assert.match(serve, /const CHAT_SYSTEM =/, "the notes prompt is the only system prompt");
 assert.match(serve, /function normalizeEffort\(/, "the server should whitelist client effort overrides");
 assert.match(serve, /normalizeEffort\(payload && payload\.effort\)/, "the /q payload effort should be honored");
 // Fable 5 refusal safety net: a classifier decline is re-served by Opus 4.8
@@ -114,23 +115,14 @@ assert.match(
 );
 assert.match(
   app,
-  /let citationSlides = \[\];/,
-  "streaming answers should track the exact slides that were sent as context"
+  /const cited = imgs\.map\(\(im\) => im\.page && slideByPage\(im\.page\)\)\.filter\(Boolean\);/,
+  "only a pasted slide region is eligible for a citation check"
 );
+assert.doesNotMatch(app, /pickedSlides/, "search hits are not sent with the question");
 assert.match(
   app,
-  /const pickedSlides = res\.results\.slice\(0,\s*12\);/,
-  "text questions should keep a concrete candidate slide list for citation checks"
-);
-assert.match(
-  app,
-  /citationSlides = pickedSlides\.map\(\(r\) => data\.slides\[r\.docId\]\)\.filter\(Boolean\);/,
-  "citation checks should use only the candidate slides sent to the model"
-);
-assert.match(
-  app,
-  /SlideSearchEngine\.verifyCitations\(assistantTurn\.content,\s*citationSlides,\s*\{\s*\n?\s*trustedPages:/,
-  "streaming answers should verify final slide citations against candidate slides, trusting image-attached pages"
+  /SlideSearchEngine\.verifyCitations\(assistantTurn\.content,\s*cited,/,
+  "a citation is checked only against a slide the user actually pasted"
 );
 
 console.log("client provider checks passed");

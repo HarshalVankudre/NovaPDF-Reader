@@ -6,6 +6,7 @@
  *   toSqlite(mysqlDump)      -> string    (best-effort mysqldump -> SQLite)
  *   csvToSql(table, csvText) -> string    (CSV -> CREATE TABLE + INSERTs)
  *   detectImportKind(text)   -> 'sql' | 'csv'
+ *   adaptMysql(sql)          -> string    (course MySQL idioms -> SQLite, for the offline engine)
  *
  * The SQLite conversion is intentionally best-effort: it exists only for the
  * no-MySQL fallback path. The accurate path is the real local MySQL bridge.
@@ -223,5 +224,193 @@
     return "csv";
   }
 
-  return { splitStatements, stripDbStatements, toSqlite, cleanCreateTableForSqlite, fixInsertEscapes, parseCsv, csvToSql, detectImportKind };
+  // --- MySQL query idioms the lectures use, rewritten so they run on SQLite ----
+  // Only the offline engine calls this. Real MySQL stays untouched, and the
+  // rewrite never touches text inside strings, comments, or backtick bodies
+  // except to turn `ident` into a quoted SQLite identifier.
+  function sqlLiteral(value) {
+    return "'" + String(value).replace(/'/g, "''") + "'";
+  }
+  function unquoteIdent(tok) {
+    tok = String(tok || "").trim();
+    if (tok.length >= 2 && tok[0] === "`" && tok[tok.length - 1] === "`") return tok.slice(1, -1).replace(/``/g, "`");
+    if (tok.length >= 2 && tok[0] === '"' && tok[tok.length - 1] === '"') return tok.slice(1, -1).replace(/""/g, '"');
+    return tok;
+  }
+  function copyQuoted(s, i) {
+    const q = s[i];
+    let j = i + 1;
+    while (j < s.length) {
+      const d = s[j];
+      if (d === "\\" && q !== "`") { j += 2; continue; }
+      j++;
+      if (d === q) {
+        if (s[j] === q) { j++; continue; }
+        break;
+      }
+    }
+    return j;
+  }
+  function parseCallArgs(s, openIdx) {
+    let i = openIdx + 1;
+    let buf = "";
+    let depth = 1;
+    const args = [];
+    while (i < s.length) {
+      const c = s[i];
+      if (c === "'" || c === '"' || c === "`") {
+        const end = copyQuoted(s, i);
+        buf += s.slice(i, end);
+        i = end;
+        continue;
+      }
+      if (c === "(") { depth++; buf += c; i++; continue; }
+      if (c === ")") {
+        depth--;
+        if (depth === 0) {
+          if (!(args.length === 0 && buf.trim() === "")) args.push(buf);
+          return { args, end: i + 1 };
+        }
+        buf += c; i++; continue;
+      }
+      if (c === "," && depth === 1) { args.push(buf); buf = ""; i++; continue; }
+      buf += c; i++;
+    }
+    return null;
+  }
+  function tryCall(s, i) {
+    if (i > 0 && /[A-Za-z0-9_]/.test(s[i - 1])) return null;
+    const m = /^[A-Za-z_][A-Za-z0-9_]*/.exec(s.slice(i));
+    if (!m) return null;
+    let j = i + m[0].length;
+    while (j < s.length && /\s/.test(s[j])) j++;
+    if (s[j] !== "(") return null;
+    const parsed = parseCallArgs(s, j);
+    if (!parsed) return null;
+    return { name: m[0], args: parsed.args, end: parsed.end };
+  }
+  function tryLimit(s, i) {
+    if (i > 0 && /[A-Za-z0-9_]/.test(s[i - 1])) return null;
+    const m = /^LIMIT\s+(\d+)\s*,\s*(\d+)/i.exec(s.slice(i));
+    if (!m) return null;
+    return { text: "LIMIT " + m[2] + " OFFSET " + m[1], end: i + m[0].length };
+  }
+  function dayNameExpr(expr) {
+    return "CASE CAST(strftime('%w', " + expr + ") AS INTEGER)" +
+      " WHEN 0 THEN 'Sunday' WHEN 1 THEN 'Monday' WHEN 2 THEN 'Tuesday'" +
+      " WHEN 3 THEN 'Wednesday' WHEN 4 THEN 'Thursday' WHEN 5 THEN 'Friday'" +
+      " WHEN 6 THEN 'Saturday' END";
+  }
+  function timePart(fmt, expr) {
+    return "CAST(strftime('" + fmt + "', " + expr + ") AS INTEGER)";
+  }
+  function timestampDiff(unitRaw, start, end) {
+    const unit = String(unitRaw || "").trim().replace(/^['"`]+|['"`]+$/g, "").toLowerCase();
+    const delta = "(julianday(" + end + ") - julianday(" + start + "))";
+    if (unit === "year") return "(CAST(strftime('%Y', " + end + ") AS INTEGER) - CAST(strftime('%Y', " + start + ") AS INTEGER))";
+    if (unit === "month") {
+      return "((CAST(strftime('%Y', " + end + ") AS INTEGER) - CAST(strftime('%Y', " + start + ") AS INTEGER)) * 12" +
+        " + CAST(strftime('%m', " + end + ") AS INTEGER) - CAST(strftime('%m', " + start + ") AS INTEGER))";
+    }
+    if (unit === "day") return "CAST(" + delta + " AS INTEGER)";
+    if (unit === "hour") return "CAST(" + delta + " * 24 AS INTEGER)";
+    if (unit === "minute") return "CAST(" + delta + " * 1440 AS INTEGER)";
+    if (unit === "second") return "CAST(" + delta + " * 86400 AS INTEGER)";
+    return null;
+  }
+  function emitCall(name, args) {
+    const n = name.toUpperCase();
+    const pass = name + "(" + args.join(", ") + ")";
+    if ((n === "CURDATE" || n === "CURRENT_DATE") && args.length === 0) return "date('now')";
+    if ((n === "CURTIME" || n === "CURRENT_TIME") && args.length === 0) return "time('now')";
+    if ((n === "NOW" || n === "CURRENT_TIMESTAMP") && args.length === 0) return "datetime('now')";
+    if (n === "YEAR" && args.length === 1) return timePart("%Y", args[0]);
+    if (n === "MONTH" && args.length === 1) return timePart("%m", args[0]);
+    if (n === "DAY" && args.length === 1) return timePart("%d", args[0]);
+    if (n === "HOUR" && args.length === 1) return timePart("%H", args[0]);
+    if (n === "MINUTE" && args.length === 1) return timePart("%M", args[0]);
+    if (n === "SECOND" && args.length === 1) return timePart("%S", args[0]);
+    if (n === "DAYNAME" && args.length === 1) return dayNameExpr(args[0]);
+    if (n === "DATEDIFF" && args.length === 2) {
+      return "CAST(julianday(date(" + args[0] + ")) - julianday(date(" + args[1] + ")) AS INTEGER)";
+    }
+    if (n === "TIMESTAMPDIFF" && args.length === 3) {
+      const rewritten = timestampDiff(args[0], args[1], args[2]);
+      if (rewritten) return rewritten;
+    }
+    if (n === "IF" && args.length === 3) return "CASE WHEN " + args[0] + " THEN " + args[1] + " ELSE " + args[2] + " END";
+    if (n === "CONCAT" && args.length >= 1) return "(" + args.join(" || ") + ")";
+    if (n === "GROUP_CONCAT" && args.length === 1) {
+      const sep = /^([\s\S]+?)\s+SEPARATOR\s+([\s\S]+)$/i.exec(args[0]);
+      if (sep) return "group_concat(" + sep[1] + ", " + sep[2] + ")";
+    }
+    return pass;
+  }
+  function rewriteBody(s) {
+    let out = "";
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if ((c === "-" && s[i + 1] === "-") || c === "#") {
+        const nl = s.indexOf("\n", i);
+        const end = nl === -1 ? s.length : nl + 1;
+        out += s.slice(i, end);
+        i = end;
+        continue;
+      }
+      if (c === "/" && s[i + 1] === "*") {
+        const end = s.indexOf("*/", i + 2);
+        const to = end === -1 ? s.length : end + 2;
+        out += s.slice(i, to);
+        i = to;
+        continue;
+      }
+      if (c === "'" || c === '"') {
+        const end = copyQuoted(s, i);
+        out += s.slice(i, end);
+        i = end;
+        continue;
+      }
+      if (c === "`") {
+        const end = copyQuoted(s, i);
+        const raw = s.slice(i + 1, end - 1).replace(/``/g, "`");
+        out += '"' + raw.replace(/"/g, '""') + '"';
+        i = end;
+        continue;
+      }
+      const lim = tryLimit(s, i);
+      if (lim) { out += lim.text; i = lim.end; continue; }
+      const call = tryCall(s, i);
+      if (call) {
+        out += emitCall(call.name, call.args.map((a) => rewriteBody(a.trim())));
+        i = call.end;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+  function adaptStatement(st) {
+    const s = st.trim();
+    let m = /^show\s+tables(?:\s+like\s+('(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.)*"|\S+))?\s*$/i.exec(s);
+    if (m) {
+      const like = m[1] ? " AND name LIKE " + (/^['"]/.test(m[1]) ? m[1] : sqlLiteral(m[1])) : "";
+      return "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'" + like + " ORDER BY name";
+    }
+    m = /^show\s+create\s+table\s+(.+?)\s*$/i.exec(s);
+    if (m) return "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = " + sqlLiteral(unquoteIdent(m[1]));
+    m = /^show\s+columns\s+from\s+(\S+)\s*$/i.exec(s);
+    if (m) return "PRAGMA table_info(" + sqlLiteral(unquoteIdent(m[1])) + ")";
+    m = /^(?:describe|desc)\s+(\S+)\s*$/i.exec(s);
+    if (m) return "PRAGMA table_info(" + sqlLiteral(unquoteIdent(m[1])) + ")";
+    return rewriteBody(s);
+  }
+  function adaptMysql(sql) {
+    const parts = splitStatements(sql);
+    if (!parts.length) return String(sql || "");
+    return parts.map(adaptStatement).join(";\n") + ";";
+  }
+
+  return { splitStatements, stripDbStatements, toSqlite, cleanCreateTableForSqlite, fixInsertEscapes, parseCsv, csvToSql, detectImportKind, adaptMysql };
 });

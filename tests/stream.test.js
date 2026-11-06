@@ -34,6 +34,21 @@ const err = (status, name) => Object.assign(new Error("boom " + status), { statu
 
   // 1) transient pre-token failure -> retried once, second attempt streams
   {
+    const choice = { id: "test-selected-model", label: "Selected", efforts: ["low", "medium", "high", "max"], maxTokens: 32000 };
+    await streamWithFallback({ ...PAYLOAD, effort: "xhigh" }, fakeRes(), { ...BASE, modelChoice: choice,
+      stream: async (provider, key, messages, write, signal, effort) => {
+        assert.strictEqual(provider.model, choice.id, "the selection must reach the provider transport");
+        assert.strictEqual(provider.maxTokens, 32000);
+        assert.strictEqual(effort, "high", "verification effort should stay within model capabilities");
+        write("selected");
+      },
+    });
+    await streamWithFallback(PAYLOAD, fakeRes(), { ...BASE, stream: async (provider, key, messages, write) => {
+      assert.strictEqual(provider.model, "claude-fable-5", "per-request choices must not mutate the server default");
+      write("default");
+    } });
+  }
+  {
     let calls = 0;
     const res = fakeRes();
     const out = await streamWithFallback(PAYLOAD, res, Object.assign({}, BASE, {

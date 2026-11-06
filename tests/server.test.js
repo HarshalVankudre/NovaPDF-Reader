@@ -58,6 +58,7 @@ async function request(pathname, init) {
     const index = await request("/");
     assert.strictEqual(index.status, 200, "index should load");
     assert.match(index.headers.get("content-type") || "", /^text\/html/i);
+    assert.doesNotMatch(await index.text(), /assets\/(?:sandbox|sql-util|sql-wasm)\./, "the reader must not load the removed SQL subsystem");
     const etag = index.headers.get("etag");
     assert.ok(etag, "static files should carry an ETag");
     const revalidated = await request("/", { headers: { "If-None-Match": etag } });
@@ -104,6 +105,16 @@ async function request(pathname, init) {
     const getQ = await request("/q");
     assert.strictEqual(getQ.status, 405, "/q only accepts POST");
 
+    const prefs = await request("/prefs");
+    assert.strictEqual(prefs.status, 200);
+    assert.strictEqual(prefs.headers.get("cache-control"), "no-store");
+    const choices = await prefs.json();
+    assert.deepStrictEqual(Object.keys(choices).sort(), ["defaultEffort", "defaultModel", "models"]);
+    assert.strictEqual(choices.defaultModel, "claude-fable-5");
+    assert.strictEqual(choices.defaultEffort, "high");
+    assert.deepStrictEqual(Object.keys(choices.models[0]).sort(), ["efforts", "id", "label", "maxTokens"], "preferences expose only model metadata");
+    assert.strictEqual((await request("/prefs", { method: "POST" })).status, 405);
+
     const textRoute = await request("/q", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -124,6 +135,14 @@ async function request(pathname, init) {
     });
     assert.strictEqual(imageRoute.status, 400, "image requests should validate the key before streaming");
     assert.match((await imageRoute.json()).error || "", /Claude Fable 5.*ANTHROPIC_API_KEY/i);
+
+    for (const endpoint of ["status", "schema", "query", "import", "filestatus", "file"]) {
+      assert.strictEqual((await request("/sql/" + endpoint)).status, 404, "the retired SQL endpoint must be absent: " + endpoint);
+      assert.strictEqual((await request("/sql/" + endpoint, { method: "POST" })).status, 405, "the static server must reject POST to the retired SQL endpoint: " + endpoint);
+    }
+    for (const asset of ["sandbox.js", "sql-util.js", "sql-wasm.js", "sql-wasm.wasm"]) {
+      assert.strictEqual((await request("/assets/" + asset)).status, 404, "the removed SQL asset must not be served: " + asset);
+    }
 
     console.log("server regression checks passed");
   } finally {

@@ -11,8 +11,9 @@ const {
   providerChainForMessages,
   messagesContainImage,
   buildOpenAIRequestBody,
+  REASONING_EFFORTS,
+  modelChoicesFromApi,
 } = require("./llm-config");
-const SqlUtil = require("./assets/sql-util.js");
 
 // When packaged as a single .exe (pkg), the static assets ship next to the
 // executable rather than inside the virtual snapshot, so resolve ROOT to the
@@ -29,7 +30,6 @@ const MIME = {
   ".png": "image/png",
   ".svg": "image/svg+xml",
   ".woff2": "font/woff2",
-  ".wasm": "application/wasm",
   ".map": "application/json",
 };
 
@@ -145,15 +145,31 @@ const LLM = createLLMConfig(CONFIG_DIR, CONFIG);
 const KEYS = LLM.keys;
 const PROVIDERS = LLM.providers;
 
+const ANSWER_FORMAT_RULES =
+  'Follow the current request\'s explicit answer format before choosing a layout. Preserve its labels, ' +
+  'numbering, order, item count, table columns, units and requested precision. The requested format takes ' +
+  'priority over default Markdown and source annotations.\n' +
+  'If it asks for only a number, word, option letters, code, JSON or CSV, return that payload alone. ' +
+  'JSON must be valid JSON; raw code and CSV stay raw when requested. Add no wrapper, heading, citation ' +
+  'or explanation to an exact-format answer.\n' +
+  'For multiple choice, give all correct option labels; include option text only if requested or labels ' +
+  'are absent. For true/false, give one verdict per statement. For calculations, give the result with ' +
+  'the appropriate units and precision. Give reasons, derivations or examples when the task asks for them.\n' +
+  'Answer every requested part in order, including every item when a count is specified. Keep explanations ' +
+  'as short as the task permits while retaining required steps, conditions and qualifications.\n' +
+  'When no format is specified, use the shortest complete answer in the question\'s language. Start with ' +
+  'the answer itself and stop when the task is answered. Omit introductions, question restatements, ' +
+  'unrequested background, study advice, recaps and follow-up offers.\n' +
+  'Before sending, silently check correctness, coverage of every part, and compliance with the requested format.';
+
 const SYSTEM_PROMPT =
   'You are a precise study assistant for the German university database course ' +
   '"DSCB140 - Datenbanken & Datenkunde". You receive a student QUESTION and several candidate ' +
   'lecture SLIDES (each with a global page number, its lecture, a title, and extracted text). ' +
   'Identify which slide(s) best answer the question, then write the answer GROUNDED ' +
-  'ONLY in those slides - never invent facts not present in them. Answer in the SAME language as ' +
-  'the question. Give ONLY the answer - the bare value/term/correct option, no preamble and no ' +
-  'restating; at most one short sentence unless the task is inherently multi-part. If none of the ' +
-  'slides answer it, say so in a few words and use an empty slides list. Return ONLY a JSON object ' +
+  'only in those slides. Apply the following answer rules to the answer field, preserving the outer JSON ' +
+  'envelope used by the app:\n' + ANSWER_FORMAT_RULES + '\n' +
+  'If none of the slides answer it, say so in a few words and use an empty slides list. Return a JSON object ' +
   '(no markdown, no code fences) of the exact ' +
   'form: {"answer": "...", "slides": [<global page numbers you actually used, most relevant first>]}';
 
@@ -243,17 +259,14 @@ const CHAT_SYSTEM =
   'screen, so an answer has to be complete, correct and quick to scan.\n' +
   '\n' +
   'A question may come with slide excerpts as text, the most relevant slides as images (each labeled ' +
-  '"Bild von Folie N"), a pasted task screenshot, attached files (e.g. .sql), and the imported database ' +
-  'schema with its SQL dialect. Every question stands alone - there is no conversation - so each answer ' +
+  '"Bild von Folie N"), a pasted task screenshot, and attached text files. ' +
+  'Every question stands alone - there is no conversation - so each answer ' +
   'is self-contained and never refers to earlier notes or answers.\n' +
   '\n' +
+  'Answer contract\n' + ANSWER_FORMAT_RULES + '\n' +
+  '\n' +
   'Solving the task\n' +
-  'The typed or pasted task (text or screenshot) is the subject; the slides are reference material. Answer ' +
-  'every part the task asks for: each sub-question (a, b, c, ...), each requested deliverable, each condition ' +
-  'such as "alle Spalten", "beide Richtungen" or "nennen Sie drei". When the task numbers its parts ("(1) ..., ' +
-  '(2) ...", "a) b) c)"), mirror that numbering so each part is visibly answered, in order. When it asks for N ' +
-  'items, write out all N rather than ending on "etc.", "..." or "usw.". A missing part is a wrong answer for ' +
-  'that part even when everything stated is correct, which is why completeness comes before brevity.\n' +
+  'The typed or pasted task (text or screenshot) is the subject; the slides are reference material. ' +
   'Ground the answer in the provided material where it covers the task. ER diagrams, cardinalities, table ' +
   'contents and SQL on the slide images are often missing from the extracted text, so read the images. Copy ' +
   'names, numbers and terminology character-exactly from the source and use the German terms the slides use, ' +
@@ -261,31 +274,15 @@ const CHAT_SYSTEM =
   'wrong: every option of a multiple-choice question (several can be correct), both directions of a ' +
   'relationship for cardinalities and (min,max) notation, the normal-form definitions against the given ' +
   'attributes and dependencies, and any arithmetic.\n' +
-  'If the material does not cover the question, answer correctly from standard database knowledge and end ' +
-  'with "(allg.)" instead of a slide citation - a correct uncited answer is more useful than a refusal.\n' +
+  'If the material does not cover a general knowledge question, use established knowledge. If a required ' +
+  'value, diagram or passage is missing or unreadable, use the requested format\'s unknown/null form when ' +
+  'available; otherwise identify the missing information in one short sentence instead of inventing an answer.\n' +
   '\n' +
-  'SQL\n' +
-  'Use exactly the table and column names from the provided schema: the query runs against that database, so ' +
-  'invented, translated or "corrected" names fail. Match the stated dialect (MySQL unless the context says ' +
-  'SQLite). Each sub-task that needs SQL gets its own complete, runnable statement in its own ```sql block, ' +
-  'with keywords in uppercase; if the task names a construct (JOIN, Subquery, HAVING, VIEW, ...), use it.\n' +
-  'When a sub-task asks for a value that only the data can produce (eine Summe, Anzahl, ein Ergebnis zum ' +
-  'Eintragen), write the query that computes it as its own ```sql block: read-only blocks run automatically ' +
-  'against the imported database and the value appears right under the block. That query is the answer to ' +
-  'that part - don\'t estimate the number yourself or point to DBeaver or another tool instead.\n' +
-  '\n' +
-  'Form (Markdown is rendered: bold, lists, tables, code blocks)\n' +
-  'Answer in the question\'s language. Start with the answer itself and stop once everything asked is ' +
-  'answered - no lead-in such as "Die Antwort ist" or "Laut Folie", no restating the question, no recap. ' +
-  'Explain only when the task asks for it (warum, erkläre, begründe, Herleitung/Schritte), and then briefly; ' +
-  'keeping it short never drops a requested part.\n' +
-  'Multiple choice: all correct options, verbatim. True/false: a verdict for every statement. Compute/derive ' +
-  'tasks: the result first, the derivation only if the task asks to show it.\n' +
-  'Choose the layout that reads fastest: a bare term when that answers it; a list, table or code block when it ' +
-  'genuinely speeds up scanning.\n' +
-  'End with the source as "(Folie N)" or "(Folie N, M)" with nothing after it - global slide numbers of ' +
-  'provided slides that actually support the answer (the app turns these into links and checks them against ' +
-  'the slides it sent, so a slide that was not provided must not be cited). Screenshot tasks need no citation.\n' +
+  'Sources\n' +
+  'For ordinary prose answers, end with "(Folie N)" or "(Folie N, M)" using only provided slides that support ' +
+  'the answer. The app checks these citations, so cite no slide that was not supplied. Use "(allg.)" for ' +
+  'general knowledge instead. Omit source annotations when they would break a requested format, such as ' +
+  'an answer-only result, a table-only answer, code, JSON or CSV. Screenshot tasks need no citation.\n' +
   '\n' +
   'This is a notes document: never mention being an AI or a model, or that the text is generated.';
 
@@ -329,10 +326,51 @@ const FABLE_FALLBACK_BETA = "server-side-fallback-2026-06-01";
 const isFableModel = (m) => /fable|mythos/i.test(String(m || ""));
 // The client may override effort per request (whitelisted): ":fast" answers run
 // at "medium" for latency; the cross-check arbiter runs at "xhigh" for depth.
-const EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
+const EFFORTS = new Set(REASONING_EFFORTS);
 function normalizeEffort(e) {
   e = String(e || "").toLowerCase();
   return EFFORTS.has(e) ? e : REASONING_EFFORT;
+}
+
+let modelCatalog = null, modelCatalogUntil = 0, modelCatalogPending = null;
+function defaultModelChoice() {
+  return { id: PROVIDERS.opus.model, label: PROVIDERS.opus.label, efforts: REASONING_EFFORTS, maxTokens: 64000 };
+}
+async function getModelCatalog() {
+  if (modelCatalog && Date.now() < modelCatalogUntil) return modelCatalog;
+  if (!KEYS.opus) return [defaultModelChoice()];
+  if (!modelCatalogPending) {
+    modelCatalogPending = (async () => {
+      const Anthropic = require("@anthropic-ai/sdk");
+      const client = new Anthropic({ apiKey: KEYS.opus, timeout: 10000, maxRetries: 0 });
+      const records = [];
+      for await (const model of client.models.list({ limit: 100 })) records.push(model);
+      const choices = modelChoicesFromApi(records);
+      if (!choices.some((model) => model.id === PROVIDERS.opus.model)) choices.unshift(defaultModelChoice());
+      modelCatalog = choices;
+      modelCatalogUntil = Date.now() + 15 * 60 * 1000;
+      return choices;
+    })().finally(() => { modelCatalogPending = null; });
+  }
+  return modelCatalogPending;
+}
+async function resolveModelChoice(requested) {
+  if (requested == null || requested === "" || requested === PROVIDERS.opus.model) {
+    return (modelCatalog || []).find((model) => model.id === PROVIDERS.opus.model) || defaultModelChoice();
+  }
+  if (typeof requested !== "string" || !/^[a-zA-Z0-9._-]{1,100}$/.test(requested)) {
+    throw Object.assign(new Error("Ungültiges Modell."), { status: 400 });
+  }
+  const model = (await getModelCatalog()).find((choice) => choice.id === requested);
+  if (!model) throw Object.assign(new Error("Modell nicht verfügbar. Bitte in den Einstellungen neu auswählen."), { status: 400 });
+  return model;
+}
+function effortForModel(effort, model) {
+  const supported = model.efforts;
+  for (let i = REASONING_EFFORTS.indexOf(effort); i >= 0; i--) {
+    if (supported.includes(REASONING_EFFORTS[i])) return REASONING_EFFORTS[i];
+  }
+  return supported[0];
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -347,7 +385,7 @@ async function streamAnthropic(p, key, messages, write, signal, effort, onActivi
   // (on Fable 5 thinking is always on anyway; never send {type:"disabled"}).
   const params = {
     model: p.model,
-    max_tokens: 64000,                              // thinking counts toward max_tokens; headroom so long multi-part answers at high effort aren't cut off
+    max_tokens: p.maxTokens || 64000,               // leave room for thinking within the selected model's output limit
     // "adaptive" is explicit on purpose — an Opus model via the models.opus
     // override would otherwise run without thinking. "summarized" makes the
     // stream carry thinking progress, which the stall detector uses as a
@@ -463,7 +501,8 @@ const RETRY_DELAY_MS = 1500;
 // closed tab or a :stop doesn't keep a paid generation running.
 async function streamWithFallback(payload, res, opts = {}) {
   const messages = payload.messages;
-  const effort = normalizeEffort(payload && payload.effort);
+  const choice = opts.modelChoice || await resolveModelChoice(payload.model);
+  const effort = effortForModel(normalizeEffort(payload && payload.effort), choice);
   const chain = providerChainForMessages(messages, normalizeProvider(payload.provider));
   const clientSignal = opts.signal || null;
   const stream = opts.stream || streamProvider;
@@ -475,7 +514,7 @@ async function streamWithFallback(payload, res, opts = {}) {
   let lastErr = null;
   for (let i = 0; i < chain.length; i++) {
     const name = chain[i];
-    const p = PROVIDERS[name];
+    const p = PROVIDERS[name] && Object.assign({}, PROVIDERS[name], { model: choice.id, label: choice.label, maxTokens: choice.maxTokens });
     const key = keys[name];
     if (!p || !key) { lastErr = Object.assign(new Error("No API key for " + (p ? p.label : name)), { status: 400 }); continue; }
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -514,137 +553,19 @@ async function streamWithFallback(payload, res, opts = {}) {
   throw lastErr || new Error("all providers failed");
 }
 
-// ===================== SQL sandbox (local MySQL bridge) =====================
-// Exam-day workflow: the student gets the DB ~5 min before, exports a dump, and
-// imports it here. Queries run against the real local MySQL (exam-exact dialect).
-// mysql2 is pure-JS and optional — if it's missing or MySQL is unreachable, the
-// browser silently falls back to an in-browser SQLite sandbox.
-let mysql2Lib = null;
-function getMysql() {
-  if (mysql2Lib === null) { try { mysql2Lib = require("mysql2/promise"); } catch (e) { mysql2Lib = false; } }
-  return mysql2Lib || null;
-}
-const MYSQL_CFG = (() => {
-  const m = (CONFIG && CONFIG.mysql) || {};
-  const e = process.env;
-  return {
-    host: e.MYSQL_HOST || m.host || "127.0.0.1",
-    port: parseInt(e.MYSQL_PORT || m.port || 3306, 10) || 3306,
-    user: e.MYSQL_USER || m.user || "root",
-    password: e.MYSQL_PASSWORD != null ? e.MYSQL_PASSWORD : (m.password != null ? m.password : ""),
-    database: e.MYSQL_DATABASE || m.database || "sandbox",
-  };
-})();
-const baseConn = () => ({ host: MYSQL_CFG.host, port: MYSQL_CFG.port, user: MYSQL_CFG.user, password: MYSQL_CFG.password, connectTimeout: 4000 });
-
-// Exam snapshot: a prebuilt SQLite file (from mysql-to-sqlite.js) the app auto-loads.
-const SNAPSHOT_PATH = process.env.SLIDEFINDER_SQLITE
-  ? path.resolve(process.env.SLIDEFINDER_SQLITE)
-  : ((CONFIG && CONFIG.sqliteSnapshot) ? path.resolve(ROOT, CONFIG.sqliteSnapshot) : path.join(ROOT, "data", "exam.sqlite"));
-
-let mysqlPool = null;
-function getPool() {
-  const lib = getMysql();
-  if (!lib) return null;
-  if (!mysqlPool) {
-    mysqlPool = lib.createPool(Object.assign(baseConn(), {
-      database: MYSQL_CFG.database, multipleStatements: true, waitForConnections: true, connectionLimit: 4,
-    }));
-  }
-  return mysqlPool;
-}
-function resetPool() { if (mysqlPool) { try { mysqlPool.end().catch(() => {}); } catch (e) {} mysqlPool = null; } }
-
-async function mysqlStatus() {
-  const lib = getMysql();
-  if (!lib) return { available: false, reason: "mysql2 not installed" };
-  let conn;
-  try {
-    conn = await lib.createConnection(baseConn());
-    const [[v]] = await conn.query("SELECT VERSION() AS v");
-    let tables = [];
-    try {
-      const [rows] = await conn.query("SELECT table_name AS t FROM information_schema.tables WHERE table_schema = ?", [MYSQL_CFG.database]);
-      tables = rows.map((r) => r.t);
-    } catch (e) {}
-    return { available: true, version: v.v, database: MYSQL_CFG.database, tables };
-  } catch (e) {
-    return { available: false, reason: (e && (e.code || e.message)) || "connect failed" };
-  } finally { try { if (conn) await conn.end(); } catch (e) {} }
-}
-
-async function mysqlSchema(conn) {
-  const db = MYSQL_CFG.database;
-  const runner = conn || getPool();
-  if (!runner) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
-  const [rows] = await runner.query(
-    "SELECT table_name AS t, column_name AS c, column_type AS ty FROM information_schema.columns WHERE table_schema = ? ORDER BY table_name, ordinal_position", [db]);
-  const map = new Map();
-  for (const r of rows) { if (!map.has(r.t)) map.set(r.t, []); map.get(r.t).push({ name: r.c, type: r.ty }); }
-  return [...map.entries()].map(([name, columns]) => ({ name, columns }));
-}
-
-async function mysqlImport(dumpText) {
-  const lib = getMysql();
-  if (!lib) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
-  const conn = await lib.createConnection(Object.assign(baseConn(), { multipleStatements: true }));
-  const db = MYSQL_CFG.database;
-  try {
-    await conn.query("DROP DATABASE IF EXISTS `" + db + "`");
-    await conn.query("CREATE DATABASE `" + db + "` CHARACTER SET utf8mb4");
-    await conn.query("USE `" + db + "`");
-    const cleaned = SqlUtil.stripDbStatements(dumpText);
-    try {
-      if (cleaned.trim()) await conn.query(cleaned); // fast path: one multi-statement batch
-    } catch (batchErr) {
-      // precise path: run statement-by-statement so we can name the offender
-      const stmts = SqlUtil.splitStatements(dumpText).filter((st) =>
-        !/^(CREATE\s+DATABASE|CREATE\s+SCHEMA|DROP\s+DATABASE|DROP\s+SCHEMA|USE|SET|LOCK\s+TABLES|UNLOCK\s+TABLES|\/\*)/i.test(st));
-      for (const st of stmts) {
-        try { await conn.query(st); }
-        catch (e2) { throw Object.assign(new Error("SQL-Import fehlgeschlagen bei: " + st.slice(0, 90).replace(/\s+/g, " ") + " … → " + e2.message), { status: 400 }); }
-      }
-    }
-    const schema = await mysqlSchema(conn);
-    const [counts] = await conn.query("SELECT table_name AS t, table_rows AS r FROM information_schema.tables WHERE table_schema = ?", [db]);
-    const rowMap = new Map(counts.map((r) => [r.t, Number(r.r) || 0]));
-    return { engine: "mysql", database: db, tables: schema.map((t) => ({ name: t.name, rows: rowMap.get(t.name) || 0, columns: t.columns })) };
-  } finally { try { await conn.end(); } catch (e) {} resetPool(); }
-}
-
-async function mysqlQuery(sql) {
-  const pool = getPool();
-  if (!pool) throw Object.assign(new Error("mysql2 not installed"), { status: 500 });
-  const stmts = SqlUtil.splitStatements(sql);
-  if (!stmts.length) return { engine: "mysql", sets: [] };
-  const conn = await pool.getConnection();
-  const sets = [];
-  try {
-    for (const st of stmts) {
-      const [res, fields] = await conn.query(st);
-      if (Array.isArray(res)) {
-        const columns = fields && fields.length ? fields.map((f) => f.name) : (res[0] ? Object.keys(res[0]) : []);
-        sets.push({ columns, rows: res.map((r) => columns.map((c) => normalizeCell(r[c]))), rowCount: res.length });
-      } else {
-        sets.push({ columns: ["Ergebnis"], rows: [["OK · " + (res.affectedRows != null ? res.affectedRows + " Zeile(n) betroffen" : "ausgeführt")]], rowCount: 0 });
-      }
-    }
-    return { engine: "mysql", sets };
-  } finally { conn.release(); }
-}
-function normalizeCell(v) {
-  if (v == null) return null;
-  if (v instanceof Date) return v.toISOString().replace("T", " ").replace(/\.\d+Z$/, "");
-  if (Buffer.isBuffer(v)) return v.toString("utf8");
-  if (typeof v === "object") return JSON.stringify(v);
-  return v;
-}
-
 function handleRequest(req, res) {
   let urlPath;
   try { urlPath = decodeURIComponent(req.url.split("?")[0]); }
   catch { urlPath = req.url.split("?")[0]; }
   if (urlPath === "/") urlPath = "/index.html";
+
+  if (urlPath === "/prefs") {
+    if (!allowMethods(req, res, ["GET"])) return;
+    res.setHeader("Cache-Control", "no-store");
+    return getModelCatalog().then((models) => sendJson(res, 200, {
+      defaultModel: PROVIDERS.opus.model, defaultEffort: REASONING_EFFORT, models,
+    })).catch(() => sendJson(res, 503, { error: "Modellliste nicht verfügbar. Bitte erneut versuchen." }));
+  }
 
   // Disguised lecture endpoint: /lec/<n> streams vl<n>.pdf as text/plain so
   // download managers (IDM etc.) don't intercept it as a PDF download. The app
@@ -696,69 +617,23 @@ function handleRequest(req, res) {
         const need = PROVIDERS[chain[0]] || PROVIDERS.opus;
         return sendJson(res, 400, { error: "No API key for " + need.label + ". Set " + need.envHint + " or add it to serve.config.json, then restart the server." });
       }
+      let modelChoice;
+      try { modelChoice = await resolveModelChoice(payload.model); }
+      catch (e) { return sendJson(res, e.status === 400 ? 400 : 503, { error: e.status === 400 ? e.message : "Modellliste nicht verfügbar. Bitte erneut versuchen." }); }
+      if (res.destroyed || res.writableEnded) return;
       console.log("POST /q  chain=[" + chain.join(",") + "]  image=" + messagesContainImage(messages) + "  turns=" + messages.length);
       res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-cache", "X-Accel-Buffering": "no" });
       // browser gone (tab closed, :stop, new question) -> abort the upstream generation
       const client = new AbortController();
       res.on("close", () => { if (!res.writableFinished) client.abort(); });
       try {
-        await streamWithFallback(payload, res, { signal: client.signal });
+        await streamWithFallback(payload, res, { signal: client.signal, modelChoice });
       } catch (e) {
         if (e && e.clientGone) { console.log("  client disconnected -> upstream aborted"); return; }
         console.log("stream error:", e && e.message);
         try { res.write("\n\n_(Fehler: " + ((e && e.message) || "stream failed") + ")_"); } catch (e2) {}
       }
       try { res.end(); } catch (e) {}
-    });
-    return;
-  }
-
-  // SQL sandbox: status probe + query + dump import against the local MySQL.
-  if (urlPath === "/sql/status") {
-    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
-    if (req.method === "HEAD") { res.writeHead(200); return res.end(); }
-    return mysqlStatus().then((s) => sendJson(res, 200, s)).catch((e) => sendJson(res, 200, { available: false, reason: (e && e.message) || "error" }));
-  }
-  if (urlPath === "/sql/filestatus") {
-    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
-    return fs.stat(SNAPSHOT_PATH, (err, st) => {
-      if (err || !st.isFile()) return sendJson(res, 200, { exists: false });
-      sendJson(res, 200, { exists: true, size: st.size, name: path.basename(SNAPSHOT_PATH), mtime: st.mtimeMs });
-    });
-  }
-  if (urlPath === "/sql/file") {
-    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
-    return fs.stat(SNAPSHOT_PATH, (err, st) => {
-      if (err || !st.isFile()) { res.writeHead(404); return res.end("no snapshot"); }
-      res.writeHead(200, { "Content-Type": "application/octet-stream", "Content-Length": st.size, "Cache-Control": "no-store" });
-      if (req.method === "HEAD") return res.end();
-      fs.createReadStream(SNAPSHOT_PATH).on("error", () => { try { res.destroy(); } catch (e) {} }).pipe(res);
-    });
-  }
-  if (urlPath === "/sql/schema") {
-    if (!allowMethods(req, res, ["GET", "HEAD"])) return;
-    if (req.method === "HEAD") { res.writeHead(200); return res.end(); }
-    return mysqlSchema().then((tables) => sendJson(res, 200, { engine: "mysql", database: MYSQL_CFG.database, tables }))
-      .catch((e) => sendJson(res, 200, { engine: "mysql", database: MYSQL_CFG.database, tables: [], error: (e && e.message) || "schema unavailable" }));
-  }
-  if (urlPath === "/sql/query") {
-    if (!allowMethods(req, res, ["POST"])) return;
-    readJsonBody(req, res, 4e6, async (payload) => {
-      const sql = payload && payload.sql;
-      if (!sql || typeof sql !== "string") return sendJson(res, 400, { error: "Missing sql" });
-      try { const out = await mysqlQuery(sql); sendJson(res, 200, out); }
-      catch (e) { console.log("SQL query error:", e && e.message); sendJson(res, (e && e.status) || 502, { error: (e && e.message) || "query failed" }); }
-    });
-    return;
-  }
-  if (urlPath === "/sql/import") {
-    if (!allowMethods(req, res, ["POST"])) return;
-    readJsonBody(req, res, 80e6, async (payload) => {
-      const sql = payload && payload.sql;
-      if (!sql || typeof sql !== "string") return sendJson(res, 400, { error: "Missing sql" });
-      console.log("POST /sql/import  bytes=" + sql.length);
-      try { const out = await mysqlImport(sql); console.log("  imported " + out.tables.length + " tables into " + out.database); sendJson(res, 200, out); }
-      catch (e) { console.log("SQL import error:", e && e.message); sendJson(res, (e && e.status) || 502, { error: (e && e.message) || "import failed" }); }
     });
     return;
   }
@@ -833,12 +708,6 @@ if (require.main === module) {
     console.log(`DB Slide Finder  ->  http://localhost:${PORT}`);
     console.log(`serving ${ROOT}`);
     console.log("LLM key present: opus=" + !!KEYS.opus);
-    mysqlStatus().then((s) => {
-      if (s.available) console.log("SQL sandbox: MySQL " + s.version + " reachable (db '" + s.database + "', " + (s.tables ? s.tables.length : 0) + " tables) — exam-exact path ready");
-      else console.log("SQL sandbox: MySQL not reachable (" + s.reason + ") — browser SQLite fallback will be used");
-      try { const st = fs.statSync(SNAPSHOT_PATH); console.log("SQL snapshot: " + path.basename(SNAPSHOT_PATH) + " present (" + Math.round(st.size / 1024) + " KB) — app auto-loads it"); }
-      catch (e) { console.log("SQL snapshot: none yet — run `node mysql-to-sqlite.js --database <db>` to create " + path.relative(ROOT, SNAPSHOT_PATH)); }
-    }).catch(() => {});
     console.log("(Ctrl+C to stop)");
   });
 }

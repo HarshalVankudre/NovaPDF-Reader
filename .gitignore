@@ -10,7 +10,7 @@ _*.png
 # build artifacts (packaged .exe + release zips)
 dist/
 
-# exam SQL snapshot (private data, regenerated on the day)
+# Legacy private database files remain ignored
 data/exam.sqlite
 *.sqlite
 *.sqlite3

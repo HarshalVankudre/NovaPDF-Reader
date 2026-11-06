@@ -64,6 +64,9 @@
 
       <div id="aiPanel" class="ai-panel" hidden></div>
       <div class="results" id="results" role="list" aria-live="polite"></div>
+      <div id="notesResize" class="notes-resize" role="separator" tabindex="0"
+           aria-orientation="vertical" aria-label="Notizenbreite ändern" aria-controls="sidebar"
+           title="Zum Vergrößern ziehen · Esc setzt zurück" hidden></div>
     </aside>
 
     <!-- Viewer -->
@@ -113,10 +116,27 @@
     </section>
   </main>
 
+  <dialog id="adminDialog" class="prefs-dialog" aria-labelledby="adminTitle">
+    <form id="adminForm">
+      <div class="prefs-head">
+        <h2 id="adminTitle">Einstellungen</h2>
+        <button id="adminClose" type="button" class="prefs-close" aria-label="Schließen" title="Schließen (Esc)">&times;</button>
+      </div>
+      <label for="adminModel">Modell</label>
+      <select id="adminModel" disabled></select>
+      <label for="adminEffort">Denkaufwand</label>
+      <select id="adminEffort" disabled></select>
+      <p id="adminStatus" class="prefs-status" role="status"></p>
+      <div class="prefs-actions">
+        <button id="adminRetry" type="button" hidden>Erneut laden</button>
+        <button id="adminSave" type="submit" disabled>Übernehmen</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="assets/pdf.min.js"></script>
   <script src="assets/search-engine.js"></script>
-  <script src="assets/sql-util.js"></script>
-  <script src="assets/sandbox.js"></script>
+  <script src="assets/settings.js"></script>
   <script src="assets/app.js"></script>
 </body>
 </html>

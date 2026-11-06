@@ -1,4 +1,4 @@
-// Vercel serverless entry — every route (static files, /lec, /q, /llm, /sql/*)
+// Vercel serverless entry — every route (static files, /lec, /q, /llm)
 // goes through the exact handler that `node serve.js` uses locally, so the
 // lecture-PDF disguise and endpoint behavior are identical in the cloud.
 const { handleRequest } = require("../serve.js");

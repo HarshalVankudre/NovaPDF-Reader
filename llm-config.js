@@ -1,5 +1,19 @@
 const fs = require("fs");
 const path = require("path");
+const REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+// Keep the picker compatible with the tutor's image input and adaptive thinking.
+function modelChoicesFromApi(models) {
+  return models.filter((model) => {
+    const c = model.capabilities;
+    return c && c.image_input?.supported && c.thinking?.types?.adaptive?.supported && c.effort?.supported;
+  }).map((model) => ({
+    id: model.id,
+    label: model.display_name || model.id,
+    efforts: REASONING_EFFORTS.filter((effort) => model.capabilities.effort[effort]?.supported),
+    maxTokens: Math.min(64000, model.max_tokens > 0 ? model.max_tokens : 64000),
+  })).filter((model) => model.efforts.length);
+}
 
 function parseEnvText(text) {
   const values = {};
@@ -80,6 +94,8 @@ function buildOpenAIRequestBody(provider, fields) {
 }
 
 module.exports = {
+  REASONING_EFFORTS,
+  modelChoicesFromApi,
   parseEnvText,
   loadLocalEnv,
   createLLMConfig,

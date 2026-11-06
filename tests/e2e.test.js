@@ -3,8 +3,8 @@
  *   npm run test:e2e              mock mode (default, free): the SDK talks to a local mock of the
  *                                 Anthropic API that records every request and streams scripted SSE,
  *                                 so everything except the model's own words runs for real -
- *                                 retrieval, slide rendering for vision, schema injection, streaming,
- *                                 citation checks, SQL auto-run, :stop -> upstream abort, overload
+ *                                 retrieval, slide rendering for vision, attachments, streaming,
+ *                                 citation checks, code copying, :stop -> upstream abort, overload
  *                                 retry, the thinking counter.
  *   E2E_LIVE=1 npm run test:e2e   live mode: same flow against the real API with ANTHROPIC_API_KEY
  *                                 (about 5 requests at high effort with slide images - costs money).
@@ -51,6 +51,17 @@ const mock = http.createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
   req.on("end", async () => {
+    if (req.method === "GET" && req.url.startsWith("/v1/models")) {
+      const model = (id, display_name, efforts, max_tokens = 64000) => ({ id, display_name, max_tokens,
+        capabilities: { image_input: { supported: true }, thinking: { types: { adaptive: { supported: true } } },
+          effort: Object.assign({ supported: true }, Object.fromEntries(efforts.map(effort => [effort, { supported: true }]))) },
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ has_more: false, data: [
+        model("claude-fable-5", "Claude Fable 5", ["low", "medium", "high", "xhigh", "max"]),
+        model("claude-sonnet-4-6", "Claude Sonnet 4.6", ["low", "medium", "high", "max"], 32000),
+      ] }));
+    }
     if (req.method !== "POST" || !req.url.startsWith("/v1/messages")) { res.writeHead(404); return res.end(); }
     const body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
     const text = textOf(body);
@@ -111,17 +122,6 @@ const mock = http.createServer((req, res) => {
   });
 });
 
-// small exam-style snapshot: 3 Kunden (Köln x2, Bonn), 3 Bestellungen
-async function buildExamDb(file) {
-  const SQL = await require("sql.js")();
-  const db = new SQL.Database();
-  db.run(`CREATE TABLE kunde (kunde_id INTEGER PRIMARY KEY, name TEXT, ort TEXT);
-          CREATE TABLE bestellung (bestell_id INTEGER PRIMARY KEY, kunde_id INTEGER REFERENCES kunde(kunde_id), betrag REAL);
-          INSERT INTO kunde VALUES (1,'Meyer','Köln'),(2,'Schulz','Bonn'),(3,'Weber','Köln');
-          INSERT INTO bestellung VALUES (10,1,19.5),(11,1,5.0),(12,3,42.25);`);
-  fs.writeFileSync(file, Buffer.from(db.export()));
-}
-
 // ---------------- helpers ----------------
 function listen(server) { return new Promise((r) => server.listen(0, "127.0.0.1", () => r(server.address().port))); }
 async function waitFor(fn, ms, label) {
@@ -148,11 +148,9 @@ const idle = (page) => page.waitForFunction(() => !document.getElementById("askA
 const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q", "Enter"); };
 
 (async () => {
-  const dbFile = path.join(HERE, "exam.sqlite");
-  await buildExamDb(dbFile);
   const appPort = 19000 + Math.floor(Math.random() * 500);
   const confDir = fs.mkdtempSync(path.join(HERE, "conf-"));
-  const env = Object.assign({}, process.env, { PORT: String(appPort), SLIDEFINDER_CONFIG_DIR: confDir, SLIDEFINDER_SQLITE: dbFile });
+  const env = Object.assign({}, process.env, { PORT: String(appPort), SLIDEFINDER_CONFIG_DIR: confDir });
   if (!LIVE) Object.assign(env, { ANTHROPIC_API_KEY: "sk-ant-test", ANTHROPIC_BASE_URL: "http://127.0.0.1:" + (await listen(mock)) });
   const server = spawn(process.execPath, ["serve.js"], {
     cwd: ROOT,
@@ -169,6 +167,8 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
   await ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: base });
   const page = await ctx.newPage();
   const pageErrors = [];
+  const sqlRequests = [];
+  page.on("request", (request) => { if (new URL(request.url()).pathname.startsWith("/sql/")) sqlRequests.push(request.url()); });
   page.on("pageerror", (e) => pageErrors.push(String(e)));
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
 
@@ -177,6 +177,7 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
     await page.goto(base + "/");
     await page.waitForSelector("#pageWrap:not([hidden])", { timeout: 30000 });
     check("app loads, slide 1 renders in the viewer", await page.$eval("#pdfCanvas", (c) => c.width > 0));
+    check("admin settings stay hidden on load", await page.$eval("#adminDialog", (dialog) => !dialog.open));
     check("stealth: brand header hidden, title 'Notizen' not yet visible",
       await page.$eval("body", (b) => b.classList.contains("stealth")) && !(await page.$(".nt-title")));
 
@@ -193,29 +194,41 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
     check("clicking a result opens it with highlights on the main viewer", mainHl > 0, mainHl + " boxes on slide " + (await page.inputValue("#pageInput")));
     await page.screenshot({ path: path.join(SHOTS, "1-search.png") });
 
-    // 3. SQL sandbox auto-loads the snapshot, runs a query
+    // 3. Retired SQL commands do not open tools or make requests.
     await cmd(page, ":sql");
-    await page.waitForSelector(".sbx-panel:not([hidden])");
-    await waitFor(() => page.$eval("#sbxEngine", (e) => /SQLite/i.test(e.textContent)).catch(() => false), 15000, "sqlite engine");
-    await waitFor(() => page.$eval("#sbxResults", (e) => /kunde/.test(e.textContent)).catch(() => false), 15000, "snapshot tables");
-    await page.fill(".sbx-editor", "SELECT ort, COUNT(*) AS n FROM kunde GROUP BY ort ORDER BY ort;");
-    await page.click(".sbx-run");
-    await page.waitForSelector("#sbxResults .sbx-table");
-    const rows = await page.$$eval("#sbxResults .sbx-table tbody tr", (t) => t.map((r) => r.innerText.replace(/\s+/g, " ").trim()));
-    check("sandbox auto-loads exam.sqlite and runs a query", rows.join("|") === "Bonn 1|Köln 2", rows.join(" | "));
-    await page.screenshot({ path: path.join(SHOTS, "2-sandbox.png") });
-    await page.keyboard.press("Escape");
-    await page.waitForTimeout(200);
-    if (await page.$(".sbx-panel:not([hidden])")) await cmd(page, ":sql");
+    check("retired SQL command does not open a sandbox", !(await page.$(".sbx-panel")));
 
-    // 4. text question -> full RAG request, thinking counter, answer, citation check, SQL auto-run
+    // 4. text question -> full RAG request, thinking counter, answer, citations
+    if (!LIVE) await page.evaluate(() => {
+      // Hold stream paints until after completion to reproduce a late-frame race.
+      const requestFrame = window.requestAnimationFrame.bind(window);
+      const cancelFrame = window.cancelAnimationFrame.bind(window);
+      const held = new Map();
+      let nextId = -1;
+      window.requestAnimationFrame = callback => {
+        if (callback.name !== "flush") return requestFrame(callback);
+        const id = nextId--;
+        held.set(id, callback);
+        return id;
+      };
+      window.cancelAnimationFrame = id => { if (!held.delete(id)) cancelFrame(id); };
+      window.releaseTutorTestFrames = () => {
+        window.requestAnimationFrame = requestFrame;
+        window.cancelAnimationFrame = cancelFrame;
+        const count = held.size;
+        for (const callback of held.values()) callback(performance.now());
+        held.clear();
+        return count;
+      };
+    });
     const n4 = calls.length;
-    await ask(page, "Was ist die dritte Normalform? Und wie viele Kunden gibt es in der Datenbank?");
+    await ask(page, "Was ist die dritte Normalform?");
     await page.waitForSelector(".nt-a", { timeout: 15000 });
     const counter = await waitFor(() => page.$eval(".nt-wait", (e) => e.textContent).catch(() => null), LIVE ? 20000 : 8000, "thinking counter").catch(() => null);
     check("elapsed-seconds counter shows while the model thinks", LIVE ? true : /^\d+ s$/.test(counter), counter ? "showed '" + counter + "'" : "answer came before 3 s");
     await page.screenshot({ path: path.join(SHOTS, "3-thinking.png") });
     await idle(page);
+    if (!LIVE) check("completion cancels the pending stream paint", await page.evaluate(() => window.releaseTutorTestFrames()) === 0);
     const ans = await answerText(page);
     const refs = await page.$$eval(".nt-a .nt-ref", (a) => a.map((x) => +x.dataset.page));
     if (!LIVE) {
@@ -232,7 +245,7 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
       check("request: top BM25 slides sent as text", providedPages(call.text).length === 12, providedPages(call.text).length + " slides");
       check("request: top slides attached as rendered images (vision)", imgs.length >= 3 && imgs.every((x) => x.source.media_type === "image/jpeg" && x.source.data.length > 50000),
         imgs.length + " images, " + imgs.map((x) => Math.round(x.source.data.length / 1024) + "KB").join("/"));
-      check("request: imported DB schema + dialect included", /Importiertes Datenbank-Schema \(Dialekt: SQLite/.test(call.text) && /kunde/.test(call.text) && /bestellung/.test(call.text));
+      check("request contains no removed database integration", !/Importiertes Datenbank-Schema/.test(call.text));
       check("answer streams into the Notizen pane (markdown rendered)", /3NF:/.test(ans) && (await page.$(".nt-a strong")) !== null);
       check("citation check keeps the provided slide and strips the unprovided one",
         refs.includes(call.cite) && !refs.includes(call.bogus), "links: " + refs.join(",") + " (cited " + call.cite + " + bogus " + call.bogus + ")");
@@ -240,14 +253,51 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
       check("live answer arrives without an error", ans.length > 40 && !/Fehler|abgelehnt/.test(ans), JSON.stringify(ans.slice(0, 160)));
       check("live answer cites real slides (or marks itself allg.)", refs.every((p) => p >= 1 && p <= 317) && (refs.length > 0 || /allg\./.test(ans)), "links: " + (refs.join(",") || "none"));
     }
-    const sqlRes = await waitFor(() => page.$eval(".nt-sql-result", (e) => e.innerText).catch(() => null), LIVE ? 20000 : 10000, "inline sql result").catch(() => "");
-    check("read-only SQL in the answer auto-runs against the snapshot (3 Kunden)", /\b3\b/.test(sqlRes) && !/Fehler|error/i.test(sqlRes), sqlRes.replace(/\s+/g, " "));
+    if (!LIVE) {
+      await page.click(".nt-a pre.lang-sql + .nt-codebar .nt-copy");
+      const copiedCode = await page.evaluate(() => navigator.clipboard.readText());
+      check("code blocks copy as text without execution", /SELECT COUNT\(\*\) AS anzahl FROM kunde;/.test(copiedCode) && !(await page.$(".nt-sql-result")));
+    }
     await page.screenshot({ path: path.join(SHOTS, "4-answer.png") });
     if (refs.length) {
       await page.click(".nt-a .nt-ref");
       await page.waitForTimeout(600);
       check("clicking a (Folie N) citation jumps the viewer to that slide", +(await page.inputValue("#pageInput")) === refs[0]);
     }
+
+    // Notes can expand without changing the slide, and Esc restores the layout.
+    const normalSidebarWidth = await page.$eval("#sidebar", el => el.getBoundingClientRect().width);
+    const slideBeforeResize = await page.inputValue("#pageInput");
+    const canvasBeforeResize = await page.$eval("#pdfCanvas", el => el.getBoundingClientRect().width);
+    async function dragNotes(delta, release = true) {
+      const edge = await page.locator("#notesResize").boundingBox();
+      await page.mouse.move(edge.x + edge.width / 2, edge.y + 140);
+      await page.mouse.down();
+      await page.mouse.move(edge.x + edge.width / 2 + delta, edge.y + 140, { steps: 8 });
+      if (release) await page.mouse.up();
+    }
+    await dragNotes(320);
+    check("dragging the notes edge expands the panel", await page.$eval("#sidebar", el => el.getBoundingClientRect().width) > normalSidebarWidth + 280 && !(await page.$eval("#aiPanel", el => el.hidden)));
+    await page.waitForFunction(before => document.getElementById("pdfCanvas").getBoundingClientRect().width < before, canvasBeforeResize);
+    check("the PDF refits after resizing without changing pages", await page.inputValue("#pageInput") === slideBeforeResize);
+    await page.screenshot({ path: path.join(SHOTS, "6-expanded-notes.png") });
+    await page.focus("#notesResize");
+    await page.keyboard.press("End");
+    check("panel expansion leaves room for the PDF", await page.$eval("#sidebar", el => el.getBoundingClientRect().width <= el.parentElement.clientWidth - 280));
+    await page.keyboard.press("Escape");
+    check("Esc closes expanded notes and restores the normal width", await page.$eval("#aiPanel", el => el.hidden) && Math.abs(await page.$eval("#sidebar", el => el.getBoundingClientRect().width) - normalSidebarWidth) < 1);
+    await cmd(page, ":notes");
+    await dragNotes(180, false);
+    await page.keyboard.press("Escape");
+    await page.mouse.move(800, 140);
+    await page.mouse.up();
+    check("Esc during a drag releases the handle and keeps the normal width", Math.abs(await page.$eval("#sidebar", el => el.getBoundingClientRect().width) - normalSidebarWidth) < 1 && !(await page.$eval("body", el => el.classList.contains("notes-resizing"))));
+    await cmd(page, ":notes");
+    await page.focus("#notesResize");
+    await page.keyboard.press("ArrowRight");
+    check("keyboard resizing preserves the current slide", await page.$eval("#sidebar", el => el.getBoundingClientRect().width) > normalSidebarWidth && await page.inputValue("#pageInput") === slideBeforeResize);
+    await page.click(".nt-head .ai-close");
+    check("the close button also restores normal width", Math.abs(await page.$eval("#sidebar", el => el.getBoundingClientRect().width) - normalSidebarWidth) < 1 && await page.$eval("#notesResize", el => el.hidden));
 
     // 5. mid-stream overload -> server retries once, answer still arrives (mock only)
     if (!LIVE) {
@@ -298,10 +348,12 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
 
     // 8. pasted screenshot -> self-contained image question, no slide context
     await page.evaluate(async () => {
-      const c = document.createElement("canvas"); c.width = 900; c.height = 160;
-      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, 900, 160); g.fillStyle = "#000"; g.font = "22px sans-serif";
-      g.fillText("Aufgabe (Datenbank oben): a) Primärschlüssel der Tabelle kunde?", 10, 60);
-      g.fillText("b) Welches Attribut ist Fremdschlüssel in bestellung?", 10, 110);
+      const c = document.createElement("canvas"); c.width = 900; c.height = 240;
+      const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, 900, 240); g.fillStyle = "#000"; g.font = "22px sans-serif";
+      g.fillText("kunde: kunde_id (PK), name", 10, 40);
+      g.fillText("bestellung: bestell_id (PK), kunde_id (FK auf kunde.kunde_id)", 10, 85);
+      g.fillText("a) Primärschlüssel der Tabelle kunde?", 10, 145);
+      g.fillText("b) Welches Attribut ist Fremdschlüssel in bestellung?", 10, 195);
       const blob = await new Promise((r) => c.toBlob(r, "image/png"));
       const dt = new DataTransfer(); dt.items.add(new File([blob], "aufgabe.png", { type: "image/png" }));
       document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true }));
@@ -320,11 +372,11 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
     if (!LIVE) {
       const c8 = calls[n8];
       const c8imgs = c8 ? c8.body.messages[0].content.filter((x) => x.type === "image") : [];
-      check("screenshot ask sends the image, schema, and no slide excerpts",
-        c8 && c8.kind === "screenshot" && c8imgs.length === 1 && c8imgs[0].source.media_type === "image/png" && /kunde/.test(c8.text),
+      check("screenshot ask sends the image without database or slide context",
+        c8 && c8.kind === "screenshot" && c8imgs.length === 1 && c8imgs[0].source.media_type === "image/png" && !/Importiertes Datenbank-Schema/.test(c8.text) && !providedPages(c8.text).length,
         c8 ? c8.kind + ", " + c8imgs.length + " image" : "no call");
     }
-    check("screenshot answer uses the real schema (kunde_id)", /kunde_id/.test(a8), JSON.stringify(a8.slice(0, 160)));
+    check("screenshot answer reads the visible table structure (kunde_id)", /kunde_id/.test(a8), JSON.stringify(a8.slice(0, 160)));
     await page.screenshot({ path: path.join(SHOTS, "5-screenshot-answer.png") });
 
     // 9. Esc closes the notes, back to the search UI
@@ -342,6 +394,54 @@ const cmd = async (page, c) => { await page.fill("#q", c); await page.press("#q"
       check(":new aborts the running answer upstream", calls[n10] && calls[n10].closedEarly);
     }
 
+    // Hidden preferences: dismissal during loading, cancel/save, persistence, actual SDK selection.
+    if (!LIVE) {
+      let heldSettingsRequest;
+      await page.route(base + "/prefs", route => { heldSettingsRequest = route; });
+      await page.keyboard.press("Control+Alt+a");
+      await waitFor(() => heldSettingsRequest, 5000, "settings request");
+      await page.keyboard.press("Escape");
+      check("Esc closes settings while the model list is still loading", await page.$eval("#adminDialog", dialog => !dialog.open));
+      const responseReady = page.waitForResponse(base + "/prefs");
+      await heldSettingsRequest.continue();
+      await (await responseReady).finished();
+      await page.unroute(base + "/prefs");
+      await page.waitForTimeout(100);
+      check("a late settings response cannot reopen the popup", await page.$eval("#adminDialog", dialog => !dialog.open));
+
+      await cmd(page, ":admin");
+      await page.waitForSelector("#adminSave:enabled");
+      await page.selectOption("#adminModel", "claude-sonnet-4-6");
+      check("effort choices match the selected model", (await page.$$eval("#adminEffort option", options => options.map(option => option.value))).join(",") === "low,medium,high,max");
+      await page.selectOption("#adminEffort", "max");
+      await page.focus("#adminEffort");
+      await page.keyboard.press("Escape");
+      check("Esc closes settings from a focused selector", await page.$eval("#adminDialog", dialog => !dialog.open));
+      await cmd(page, ":admin");
+      await page.waitForSelector("#adminSave:enabled");
+      check("Esc discards unapplied settings", await page.inputValue("#adminModel") === "claude-fable-5");
+      await page.selectOption("#adminModel", "claude-sonnet-4-6");
+      await page.selectOption("#adminEffort", "max");
+      await page.click("#adminSave");
+      check("saving closes the popup", await page.$eval("#adminDialog", dialog => !dialog.open));
+      await page.reload();
+      await page.waitForSelector("#pageWrap:not([hidden])");
+      check("saved settings do not make the popup visible on reload", await page.$eval("#adminDialog", dialog => !dialog.open));
+      await cmd(page, ":admin");
+      await page.waitForSelector("#adminSave:enabled");
+      check("model and effort persist across reloads", await page.inputValue("#adminModel") === "claude-sonnet-4-6" && await page.inputValue("#adminEffort") === "max");
+      await page.keyboard.press("Escape");
+      const selectedCall = calls.length;
+      await ask(page, "Was ist ACID?");
+      await idle(page);
+      const selected = calls[selectedCall]?.body;
+      check("selected model and effort reach the real SDK", selected?.model === "claude-sonnet-4-6" && selected.output_config.effort === "max" && selected.max_tokens === 32000 && !selected.fallbacks);
+      const beforeInvalid = calls.length;
+      const invalid = await page.request.post(base + "/q", { data: { model: "not-an-available-model", messages: [{ role: "user", content: "hi" }] } });
+      check("unavailable models are rejected before generation", invalid.status() === 400 && calls.length === beforeInvalid);
+    }
+
+    check("no requests to the removed SQL API", sqlRequests.length === 0, sqlRequests.join(" | "));
     check("no page errors in the browser console", pageErrors.length === 0, pageErrors.join(" | "));
   } catch (e) {
     check("harness completed", false, e.stack.split("\n").slice(0, 3).join(" "));

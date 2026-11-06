@@ -10,6 +10,7 @@ const {
   selectProviderForMessages,
   providerChainForMessages,
   buildOpenAIRequestBody,
+  modelChoicesFromApi,
 } = require("../llm-config");
 
 const parsed = parseEnvText([
@@ -74,5 +75,18 @@ assert.deepStrictEqual(body, {
   stream: true,
   provider: { sort: "throughput" },
 });
+
+const capabilities = {
+  image_input: { supported: true },
+  thinking: { types: { adaptive: { supported: true } } },
+  effort: { supported: true, low: { supported: true }, high: { supported: true }, max: { supported: true } },
+};
+assert.deepStrictEqual(modelChoicesFromApi([
+  { id: "compatible", display_name: "Compatible", capabilities, max_tokens: 32000 },
+  { id: "text-only", capabilities: { ...capabilities, image_input: { supported: false } } },
+  { id: "legacy-thinking", capabilities: { ...capabilities, thinking: { types: { adaptive: { supported: false } } } } },
+  { id: "unknown-capabilities" },
+]), [{ id: "compatible", label: "Compatible", efforts: ["low", "high", "max"], maxTokens: 32000 }], "only compatible models and their actual effort levels should reach the picker");
+assert.strictEqual(modelChoicesFromApi([{ id: "large", capabilities, max_tokens: 128000 }])[0].maxTokens, 64000, "keep the app's output budget when the model allows more");
 
 console.log("llm configuration checks passed");
